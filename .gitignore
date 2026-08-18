@@ -1,7 +1,12 @@
 # ESP8266_RTOS_SDK / idf.py build output
 /build/
+/build*/
 sdkconfig
 sdkconfig.old
+
+# compiled kconfig stub (Windows build workaround); source is tracked
+.stubbin/*.exe
+.stubbin/*.obj
 
 # host test artifacts
 test/test_protocol

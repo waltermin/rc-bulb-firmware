@@ -48,14 +48,49 @@ tools/            send_update.py, push_dfu.py, provision_id.py
 
 ## Build & flash
 
-Requires ESP8266_RTOS_SDK and its toolchain, with `IDF_PATH` set.
+Requires ESP8266_RTOS_SDK, the xtensa-lx106 toolchain, CMake, Ninja, and Python
+(with the SDK's `requirements.txt` installed, incl. `setuptools` for
+`pkg_resources`).
+
+The simplest path is the checked-in script, which drives CMake+Ninja directly
+and applies the workarounds documented below:
+
+```sh
+./build.sh          # -> build/bulb-firmware.bin (+ bootloader, partition table)
+```
+
+Or manually:
 
 ```sh
 export IDF_PATH=/path/to/ESP8266_RTOS_SDK
-idf.py set-target esp8266          # (once)
-idf.py build
-idf.py -p <PORT> flash monitor     # full flash over serial (first time)
+export PATH="$PWD/.stubbin:$PATH"          # stub mconf-idf (see note 1)
+mkdir build && cd build
+cmake -G Ninja -DIDF_TARGET=esp8266 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..   # note 2
+ninja
 ```
+
+A verified clean build produces a **~457 KB** app — about 48 % of the 960 KB OTA
+slot.
+
+Flash the three images over serial the first time (offsets from `partitions.csv`):
+
+```sh
+esptool.py --chip esp8266 -p <PORT> write_flash \
+  0x0     build/bootloader/bootloader.bin \
+  0x8000  build/partition_table/partition-table.bin \
+  0x10000 build/bulb-firmware.bin
+```
+
+**Build-environment notes (Windows / CMake 4.x):**
+1. The SDK's kconfig init insists on an `mconf-idf` executable on `PATH` (or a
+   native host gcc). `menuconfig` is not used by a normal build — a plain build
+   generates config via `confgen.py` — so `.stubbin/mconf-idf.exe` (a trivial
+   stub) satisfies the check. See `.stubbin/README.md`.
+2. `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` lets CMake 4.x configure the SDK's older
+   submodules (mbedtls etc.) whose `cmake_minimum_required` predates 3.5.
+
+If you have a full ESP-IDF-style tools install, `idf.py set-target esp8266 &&
+idf.py build && idf.py -p <PORT> flash monitor` also works.
 
 Provision each bulb's id (one identical app image works for all bulbs):
 

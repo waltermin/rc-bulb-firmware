@@ -19,6 +19,7 @@ set(COMPONENT_REQUIRES
     esp_event
     lwip
     mbedtls
+    pthread   # provides pthread_cond_* pulled in by libstdc++ static-init guards
 )
 
 register_component()
