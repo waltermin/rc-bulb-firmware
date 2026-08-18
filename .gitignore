@@ -1,0 +1,17 @@
+# ESP8266_RTOS_SDK / idf.py build output
+/build/
+sdkconfig
+sdkconfig.old
+
+# host test artifacts
+test/test_protocol
+test/test_protocol.exe
+test/*.obj
+*.o
+
+# provisioning / firmware images
+nvs_*.bin
+
+# python
+__pycache__/
+*.pyc
