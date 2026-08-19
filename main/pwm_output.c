@@ -1,6 +1,10 @@
 // pwm_output.c — 5-channel LED PWM using the ESP8266_RTOS_SDK software PWM
 // driver. The driver's timer ISR is IRAM-resident, so PWM keeps running safely
 // even while OTA flash writes briefly disable the flash cache.
+//
+// The active channel set is generated from a single X-macro list so that
+// omitting channels (see OMIT_I2C_PINS in config.h) keeps the pin/phase/duty
+// arrays and their indices consistent automatically.
 
 #include "pwm_output.h"
 
@@ -13,24 +17,44 @@
 
 static const char *TAG = "pwm";
 
-// Duty values are in PWM timer ticks, capped at PWM_PERIOD_US.
+// X(NAME, gpio, phase_degrees, color_field)
+//   NAME        -> generates channel index CH_NAME
+//   color_field -> which pwm_output_set() argument feeds this channel
+// Cold-white is listed first so it is index 0 and serves as the phase base.
+#if OMIT_I2C_PINS
+#define PWM_CHANNEL_LIST                              \
+    X(CW,  PWM_GPIO_CW,  PWM_PHASE_CW,  cw)           \
+    X(RED, PWM_GPIO_RED, PWM_PHASE_RED, r)            \
+    X(WW,  PWM_GPIO_WW,  PWM_PHASE_WW,  ww)
+#else
+#define PWM_CHANNEL_LIST                              \
+    X(CW,    PWM_GPIO_CW,    PWM_PHASE_CW,    cw)      \
+    X(RED,   PWM_GPIO_RED,   PWM_PHASE_RED,   r)       \
+    X(GREEN, PWM_GPIO_GREEN, PWM_PHASE_GREEN, g)       \
+    X(BLUE,  PWM_GPIO_BLUE,  PWM_PHASE_BLUE,  b)       \
+    X(WW,    PWM_GPIO_WW,    PWM_PHASE_WW,    ww)
+#endif
+
+// Channel index enum + count.
+enum {
+#define X(name, gpio, phase, field) CH_##name,
+    PWM_CHANNEL_LIST
+#undef X
+    PWM_CHANNELS
+};
+
 static uint32_t s_duties[PWM_CHANNELS];
 
-// Pin list indexed the same as the duty array (see PWM_IDX_* in config.h).
 static const uint32_t s_pins[PWM_CHANNELS] = {
-    [PWM_IDX_CW] = PWM_GPIO_CW,
-    [PWM_IDX_RED] = PWM_GPIO_RED,
-    [PWM_IDX_GREEN] = PWM_GPIO_GREEN,
-    [PWM_IDX_BLUE] = PWM_GPIO_BLUE,
-    [PWM_IDX_WW] = PWM_GPIO_WW,
+#define X(name, gpio, phase, field) [CH_##name] = (gpio),
+    PWM_CHANNEL_LIST
+#undef X
 };
 
 static float s_phases[PWM_CHANNELS] = {
-    [PWM_IDX_CW] = PWM_PHASE_CW,
-    [PWM_IDX_RED] = PWM_PHASE_RED,
-    [PWM_IDX_GREEN] = PWM_PHASE_GREEN,
-    [PWM_IDX_BLUE] = PWM_PHASE_BLUE,
-    [PWM_IDX_WW] = PWM_PHASE_WW,
+#define X(name, gpio, phase, field) [CH_##name] = (phase),
+    PWM_CHANNEL_LIST
+#undef X
 };
 
 // Map a u8 channel value to a PWM duty (ticks), applying gamma and the max-power
@@ -58,15 +82,16 @@ void pwm_output_init(void) {
     pwm_set_phases(s_phases);
     pwm_start();
     pwm_output_set_default();
-    ESP_LOGI(TAG, "pwm init: %d channels @ %d Hz", PWM_CHANNELS, PWM_FREQ_HZ);
+    ESP_LOGI(TAG, "pwm init: %d channels @ %d Hz%s", PWM_CHANNELS, PWM_FREQ_HZ,
+             OMIT_I2C_PINS ? " (green+blue omitted: GPIO12/14 left for I2C)" : "");
 }
 
 void pwm_output_set(uint8_t r, uint8_t g, uint8_t b, uint8_t ww, uint8_t cw) {
-    s_duties[PWM_IDX_RED] = value_to_duty(r);
-    s_duties[PWM_IDX_GREEN] = value_to_duty(g);
-    s_duties[PWM_IDX_BLUE] = value_to_duty(b);
-    s_duties[PWM_IDX_WW] = value_to_duty(ww);
-    s_duties[PWM_IDX_CW] = value_to_duty(cw);
+    // Unused args when channels are omitted; keep the stable 5-arg interface.
+    (void)r; (void)g; (void)b; (void)ww; (void)cw;
+#define X(name, gpio, phase, field) s_duties[CH_##name] = value_to_duty(field);
+    PWM_CHANNEL_LIST
+#undef X
     pwm_set_duties(s_duties);
     pwm_start();  // commit the new duty table
 }

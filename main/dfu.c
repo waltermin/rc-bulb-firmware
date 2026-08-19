@@ -58,14 +58,23 @@ enum {
 // ---- wifi connect bookkeeping ----------------------------------------------
 #define WIFI_CONNECTED_BIT BIT0
 static EventGroupHandle_t s_wifi_events;
+static char s_ip_str[16] = "0.0.0.0";  // acquired DHCP address, for logging
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg;
-    (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         // Keep retrying until the outer timeout gives up.
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        // Record + log the DHCP address so it can be found (esp. on the devboard
+        // where we have serial; real bulbs are found via the rc_light_dfu_<id>
+        // DHCP hostname instead). ip is network byte order; octet 1 is the low byte.
+        ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
+        uint32_t a = evt->ip_info.ip.addr;
+        snprintf(s_ip_str, sizeof(s_ip_str), "%u.%u.%u.%u",
+                 (unsigned)(a & 0xff), (unsigned)((a >> 8) & 0xff),
+                 (unsigned)((a >> 16) & 0xff), (unsigned)((a >> 24) & 0xff));
+        ESP_LOGI(TAG, "DFU: got IP %s", s_ip_str);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -197,7 +206,8 @@ static int run_push_server(void) {
         close(listen_sock);
         return DFU_ST_RECV;
     }
-    ESP_LOGI(TAG, "DFU server listening on :%d", DFU_TCP_PORT);
+    ESP_LOGI(TAG, "DFU server listening on %s:%d  -->  push_dfu.py %s <fw.bin>",
+             s_ip_str, DFU_TCP_PORT, s_ip_str);
 
     // Bounded wait for a client.
     fd_set rfds;

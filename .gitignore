@@ -20,3 +20,6 @@ nvs_*.bin
 # python
 __pycache__/
 *.pyc
+
+# serial capture logs
+*.log

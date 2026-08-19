@@ -38,15 +38,17 @@
 #define PWM_GPIO_CW 5
 #define PWM_GPIO_WW 13
 
-#define PWM_CHANNELS 5
+// ---- TEST BOARD OPTION ------------------------------------------------------
+// On the bench devboard, GPIO12 (green) and GPIO14 (blue) are wired to an I2C
+// device, so those two channels must NOT be driven. With this set to 1 the PWM
+// module simply omits the green + blue channels; their pins are left untouched
+// (high-Z inputs after reset, safe for the I2C bus). Set to 0 for real bulbs.
+#ifndef OMIT_I2C_PINS
+#define OMIT_I2C_PINS 1
+#endif
 
-// Channel indices into the PWM duty/phase/pin arrays. Cold-white is index 0 so
-// it can serve as the phase-alignment base (phase 0).
-#define PWM_IDX_CW 0
-#define PWM_IDX_RED 1
-#define PWM_IDX_GREEN 2
-#define PWM_IDX_BLUE 3
-#define PWM_IDX_WW 4
+// The active channel set is derived from OMIT_I2C_PINS in pwm_output.c (channel
+// indices are generated there, not hard-coded here).
 
 #define PWM_FREQ_HZ 250
 #define PWM_PERIOD_US (1000000 / PWM_FREQ_HZ)  // 4000 us at 250 Hz
@@ -70,8 +72,8 @@
 // ---- DFU / OTA --------------------------------------------------------------
 
 // Hard-coded AP the bulb joins when entering DFU mode.
-#define DFU_AP_SSID "rc_dfu_ap"
-#define DFU_AP_PASS "changeme_dfu_pass"
+#define DFU_AP_SSID "Recurse Light DFU"
+#define DFU_AP_PASS "changeme123"
 
 // DHCP client hostname is DFU_HOSTNAME_PREFIX + decimal id, e.g. rc_light_dfu_7.
 #define DFU_HOSTNAME_PREFIX "rc_light_dfu_"

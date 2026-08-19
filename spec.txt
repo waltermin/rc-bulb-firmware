@@ -1,0 +1,27 @@
+PROTOCOL:
+
+Base station broadcasts 802.11 management frames, beacon, vendor specific (`0xDD`). OUI for the vendor specific frame is `[0x52, 0x43, 0x68]`. Ensure that this is the *only* IE in the packet, no others are allowed.
+
+```
+struct LightUpdatePacket {
+    version: u8, // currently 0x01
+    
+    // if flags == 1, then control_data is the ID of a bulb we would like to enter DFU mode
+    control_flags: u8,
+    control_data: u8,
+
+    entry_count: u8, // how many entries are in the following array, max of 11 (esp8266 firmware limit)
+    entries: [BulbEntry; entry_count],
+}
+
+struct BulbEntry {
+    bulb_id: u8,
+    color_r: u8,
+    color_g: u8,
+    color_b: u8,
+    color_ww: u8,
+    color_cw: u8,
+}
+```
+
+When a bulb receives a management frame, it will scan the BulbEntry list until it finds an entry with `bulb_id` matching its own ID, and will then update itself with the new data.
