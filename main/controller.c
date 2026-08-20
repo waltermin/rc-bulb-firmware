@@ -44,8 +44,12 @@ static void controller_task(void *arg) {
                 dfu_start(s_my_id);
                 vTaskDelete(NULL);
             }
-            // MSG_APPLY
-            pwm_output_set(msg.r, msg.g, msg.b, msg.ww, msg.cw);
+            // MSG_APPLY — wire values are u8 (0..255); normalize to [0,1].
+            pwm_output_set(msg.r  / 255.0f,
+                           msg.g  / 255.0f,
+                           msg.b  / 255.0f,
+                           msg.ww / 255.0f,
+                           msg.cw / 255.0f);
             last_seen = xTaskGetTickCount();
             at_default = false;
         }

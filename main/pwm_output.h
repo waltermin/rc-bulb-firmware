@@ -1,5 +1,10 @@
 // pwm_output.h — 5-channel LED PWM, matching stock bulb behavior
-// (250 Hz, 80% max power, gamma 2.8, phase-aligned channels).
+// (250 Hz base, 80% max power, gamma 2.8, phase-aligned channels).
+//
+// The drive algorithm (how a color becomes concrete PWM period/duty/phase) is
+// isolated in compute_frame() inside pwm_output.c — that is the single place to
+// change to experiment with different duty curves, phase layouts, or a dynamic
+// period.
 
 #ifndef BULB_PWM_OUTPUT_H
 #define BULB_PWM_OUTPUT_H
@@ -24,8 +29,10 @@ void pwm_output_init(void);
 // some later event happens to kick the driver.
 void pwm_output_start_after_radio(void);
 
-// Set all five channels from u8 values (gamma + max_power applied internally).
-void pwm_output_set(uint8_t r, uint8_t g, uint8_t b, uint8_t ww, uint8_t cw);
+// Set all five channels from normalized duty cycles in [0.0, 1.0] (values are
+// clamped to that range). The gamma curve, max-power cap, phase offsets, and
+// PWM period are all applied internally by the drive algorithm.
+void pwm_output_set(float r, float g, float b, float ww, float cw);
 
 // Apply the compile-time DEFAULT_* color. Idempotent.
 void pwm_output_set_default(void);

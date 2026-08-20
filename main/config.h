@@ -12,14 +12,14 @@
 // Fallback id used only when NVS has no provisioned "bulb_id" key.
 #define BULB_DEFAULT_ID 0
 
-// ---- default / fallback color (u8 per channel) ------------------------------
+// ---- default / fallback color (normalized [0.0, 1.0] per channel) -----------
 // Applied at boot before any radio, and again whenever the fallback timeout
 // elapses. Defaults to a warm-ish white.
-#define DEFAULT_R 0
-#define DEFAULT_G 0
-#define DEFAULT_B 0
-#define DEFAULT_WW 255
-#define DEFAULT_CW 0
+#define DEFAULT_R 0.0f
+#define DEFAULT_G 0.0f
+#define DEFAULT_B 0.0f
+#define DEFAULT_WW 1.0f
+#define DEFAULT_CW 0.0f
 
 // ---- control / fallback -----------------------------------------------------
 
@@ -56,8 +56,19 @@
 // Fraction of full scale the LEDs are allowed to reach (stock caps at 80%).
 #define PWM_MAX_POWER 0.80f
 
-// Gamma applied to each u8 channel value -> duty. 2.8 matches ESPHome's default
-// gamma_correct used by the stock firmware. Set to 1.0f to disable.
+// Duty-response curve: how a normalized channel level [0,1] maps to a
+// normalized duty [0,1], before the max-power cap and period scaling.
+//   PWM_CURVE_GAMMA      — power law, duty = level ^ PWM_GAMMA (uses PWM_GAMMA
+//                          below); 2.8 matches the stock firmware.
+//   PWM_CURVE_PERCEPTUAL — CIE L* perceptual lightness (linear toe near black
+//                          then a cubic ramp); no powf() at runtime.
+#define PWM_CURVE_GAMMA 0
+#define PWM_CURVE_PERCEPTUAL 1
+#define PWM_DUTY_CURVE PWM_CURVE_PERCEPTUAL
+
+// Gamma applied to each channel level -> duty when PWM_DUTY_CURVE is
+// PWM_CURVE_GAMMA. 2.8 matches ESPHome's default gamma_correct used by the stock
+// firmware. Set to 1.0f to disable.
 #define PWM_GAMMA 2.8f
 
 // Per-channel phase offset in DEGREES (-180..180], mirroring the stock phase
