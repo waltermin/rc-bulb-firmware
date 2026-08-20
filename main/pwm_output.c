@@ -99,3 +99,15 @@ void pwm_output_set(uint8_t r, uint8_t g, uint8_t b, uint8_t ww, uint8_t cw) {
 void pwm_output_set_default(void) {
     pwm_output_set(DEFAULT_R, DEFAULT_G, DEFAULT_B, DEFAULT_WW, DEFAULT_CW);
 }
+
+void pwm_output_start_after_radio(void) {
+    // The SDK PWM driver runs its ISR off the Wi-Fi MAC (WDEV/TSF0) hardware
+    // timer, which only ticks after esp_wifi_start(). The pwm_start() issued in
+    // pwm_output_init() therefore armed a timer that never fired, leaving the
+    // LEDs dark. Re-arm now that the radio is up: pwm_stop() clears the driver's
+    // internal start_flag so the pwm_start() inside pwm_output_set_default()
+    // re-runs pwm_timer_start() — this time under the live WDEV clock.
+    pwm_stop(0x0);              // all channels low; start_flag -> 0
+    pwm_output_set_default();   // re-applies default duties and truly starts PWM
+    ESP_LOGI(TAG, "pwm re-armed after radio start");
+}

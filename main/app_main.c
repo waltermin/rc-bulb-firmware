@@ -1,7 +1,10 @@
 // app_main.c — startup ordering and module wiring.
 //
-// Ordering rule #1: drive the LEDs before touching the radio, so the bulb lights
-// up within tens of milliseconds of power-on.
+// Ordering rule #1: configure the LEDs before touching the radio. The SDK PWM
+// driver clocks its ISR off the Wi-Fi (WDEV/TSF0) timer, which does not tick
+// until esp_wifi_start(), so actual light output is (re)armed immediately after
+// the radio comes up via pwm_output_start_after_radio() — as early as the
+// hardware allows.
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,7 +39,8 @@ static void wifi_init_promiscuous(void) {
 }
 
 void app_main(void) {
-    // 1. LEDs first — no radio yet.
+    // 1. LEDs first — GPIO/PWM configured and default color primed. No radio
+    //    yet, so this does not produce light on its own (see step 5b).
     pwm_output_init();
 
     // 2. Persistent storage (id + rollback state).
@@ -56,6 +60,11 @@ void app_main(void) {
 
     // 5. Radio up in promiscuous mode.
     wifi_init_promiscuous();
+
+    // 5b. The WDEV timer the PWM driver rides on is only clocked now that the
+    //     radio is started — actually begin LED output at the default color.
+    pwm_output_start_after_radio();
+
     controller_start(my_id);
     sniffer_start(my_id);
 

@@ -44,7 +44,7 @@
 // module simply omits the green + blue channels; their pins are left untouched
 // (high-Z inputs after reset, safe for the I2C bus). Set to 0 for real bulbs.
 #ifndef OMIT_I2C_PINS
-#define OMIT_I2C_PINS 1
+#define OMIT_I2C_PINS 0
 #endif
 
 // The active channel set is derived from OMIT_I2C_PINS in pwm_output.c (channel

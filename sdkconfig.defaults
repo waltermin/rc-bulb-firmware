@@ -1,9 +1,21 @@
 # Default sdkconfig for the bulb firmware. `idf.py build` seeds sdkconfig from
 # this file. Regenerate/adjust via `idf.py menuconfig` if needed.
 
-# --- Flash: 4 MB ---
+# --- Flash: 4 MB, DOUT ---
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Use DOUT, matching what the stock ESPHome/eboot build runs. Rationale:
+#  - the modules are not reliably quad-wired, so QIO (the SDK default) is a brick
+#    risk, and QIO also makes the bootloader quad-enable the flash at boot;
+#  - DOUT and DIO are both safe 2-line modes, BUT the ESPHome->RTOS OTA migration
+#    replaces the bootloader IN PLACE and then SOFT-resets: a soft reset does not
+#    fully re-init the SPI controller, so a DOUT(stock)->DIO(new) mode change does
+#    not survive it (the ROM reads the new image in the wrong mode -> garbage ->
+#    hang; only a power cycle recovers). Matching stock DOUT removes the mode
+#    transition so the post-migration soft reset boots cleanly. The DOUT vs DIO
+#    read-speed delta is negligible for this workload (PWM ISR is IRAM-resident).
+CONFIG_ESPTOOLPY_FLASHMODE_DOUT=y
 
 # --- Custom two-OTA partition table ---
 CONFIG_PARTITION_TABLE_CUSTOM=y
