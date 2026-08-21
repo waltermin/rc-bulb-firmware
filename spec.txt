@@ -74,7 +74,7 @@ struct BulbCommandPacket {
     seq: u32,
     bulb_id_start: u8
     bulb_id_bounds: u8
-    cmd: u32,
+    cmd: u8,
     data: ...
 }
 

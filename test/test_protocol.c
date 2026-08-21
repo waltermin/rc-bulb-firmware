@@ -86,9 +86,56 @@ static size_t build_precise_frame(uint8_t *out, uint8_t bulb_id,
     return n;
 }
 
+// Wrap a raw packet (bytes starting at the packet tag) in a beacon frame with
+// our vendor IE as the only IE. Returns total frame length.
+static size_t wrap_beacon(uint8_t *out, const uint8_t *pkt, size_t pkt_len) {
+    size_t n = 0;
+    out[n++] = 0x80;  // beacon
+    out[n++] = 0x00;
+    for (int i = 0; i < 34; i++) out[n++] = 0x00;  // rest of MAC hdr + fixed params
+    out[n++] = IE_TAG_VENDOR;
+    out[n++] = (uint8_t)(VENDOR_OUI_LEN + pkt_len);
+    out[n++] = VENDOR_OUI_0;
+    out[n++] = VENDOR_OUI_1;
+    out[n++] = VENDOR_OUI_2;
+    for (size_t i = 0; i < pkt_len; i++) out[n++] = pkt[i];
+    return n;
+}
+
+static void put_u32_le(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+// Build a beacon carrying a LightUpdateV2 (0x03) packet: [tag, entry_count, ...].
+static size_t build_v2_frame(uint8_t *out, const uint8_t *entries, uint8_t entry_count) {
+    uint8_t pkt[PROTO_LIGHT_UPDATE_V2_HDR_SIZE + PROTO_MAX_ENTRIES * PROTO_ENTRY_SIZE];
+    size_t m = 0;
+    pkt[m++] = PROTO_TAG_LIGHT_UPDATE_V2;
+    pkt[m++] = entry_count;
+    for (size_t i = 0; i < (size_t)entry_count * PROTO_ENTRY_SIZE; i++) pkt[m++] = entries[i];
+    return wrap_beacon(out, pkt, m);
+}
+
+// Build a beacon carrying a BulbCommand (0x04) with the given fixed-header fields
+// and raw payload bytes following cmd.
+static size_t build_cmd_frame(uint8_t *out, uint32_t seq, uint8_t start, uint8_t bounds,
+                              uint8_t cmd, const uint8_t *payload, size_t payload_len) {
+    uint8_t pkt[PROTO_BULB_CMD_HDR_SIZE + PROTO_SETCONFIG_HDR_SIZE + PROTO_CONFIG_VALUE_MAX];
+    size_t m = 0;
+    pkt[m++] = PROTO_TAG_BULB_COMMAND;
+    put_u32_le(&pkt[m], seq); m += 4;
+    pkt[m++] = start;
+    pkt[m++] = bounds;
+    pkt[m++] = cmd;
+    for (size_t i = 0; i < payload_len; i++) pkt[m++] = payload[i];
+    return wrap_beacon(out, pkt, m);
+}
+
 int main(void) {
     uint8_t buf[512];
 
+#if PROTO_ENABLE_LEGACY_LIGHT_UPDATE
     // --- valid LightUpdate frame, entry addressed to us ---
     {
         uint8_t entries[] = {
@@ -142,6 +189,16 @@ int main(void) {
         CHECK(r.valid);
         CHECK(r.has_entry);
     }
+#else
+    // --- legacy 0x01 is ignored when disabled ---
+    {
+        uint8_t entries[] = {MY_ID, 1, 2, 3, 4, 5};
+        size_t len = build_frame(buf, PROTO_TAG_LIGHT_UPDATE, 0, 0, entries, 1, 1, 0, 0x80);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("legacy 0x01 ignored (disabled):\n");
+        CHECK(!r.valid);
+    }
+#endif  // PROTO_ENABLE_LEGACY_LIGHT_UPDATE
 
     // --- a second IE (non-FCS trailing) is rejected ---
     {
@@ -249,6 +306,140 @@ int main(void) {
         buf[37] -= 1;  // IE length field (offset 36 tag, 37 length)
         bulb_parse_result_t r = protocol_parse_beacon(buf, len - 1, MY_ID);
         printf("truncated precise:\n");
+        CHECK(!r.valid);
+    }
+
+    // --- LightUpdateV2 (0x03) addressed to us ---
+    {
+        uint8_t entries[] = {
+            3, 10, 20, 30, 40, 50,           // not us
+            MY_ID, 11, 22, 33, 44, 55,       // us
+        };
+        size_t len = build_v2_frame(buf, entries, 2);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("v2 + matching entry:\n");
+        CHECK(r.valid);
+        CHECK(r.has_entry);
+        CHECK(!r.dfu_requested && !r.is_command);
+        CHECK(FEQ(r.r, 11 / 255.0f) && FEQ(r.g, 22 / 255.0f) && FEQ(r.b, 33 / 255.0f) &&
+              FEQ(r.ww, 44 / 255.0f) && FEQ(r.cw, 55 / 255.0f));
+    }
+
+    // --- LightUpdateV2 with no entry for us ---
+    {
+        uint8_t entries[] = {3, 10, 20, 30, 40, 50};
+        size_t len = build_v2_frame(buf, entries, 1);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("v2, no matching entry:\n");
+        CHECK(r.valid);
+        CHECK(!r.has_entry);
+    }
+
+    // --- LightUpdateV2 over the entry max ---
+    {
+        uint8_t entries[] = {MY_ID, 1, 2, 3, 4, 5};
+        size_t len = build_v2_frame(buf, entries, 1);
+        buf[36 + 2 + 3 + 1] = 12;  // entry_count field: ie(36) + tag/len(2) + oui(3) + tag(1)
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("v2 entry_count > max:\n");
+        CHECK(!r.valid);
+    }
+
+    // --- BulbCommand EnterDfu (0x04/0x00) addressed to us (bounds 0) ---
+    {
+        size_t len = build_cmd_frame(buf, 100, MY_ID, 0, PROTO_CMD_ENTER_DFU, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command EnterDfu for us:\n");
+        CHECK(r.valid);
+        CHECK(r.is_command);
+        CHECK(r.seq == 100);
+        CHECK(r.dfu_requested);
+        CHECK(!r.has_config);
+    }
+
+    // --- BulbCommand EnterDfu addressed by an inclusive range covering us ---
+    {
+        size_t len = build_cmd_frame(buf, 101, MY_ID - 2, 5, PROTO_CMD_ENTER_DFU, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command EnterDfu range covers us:\n");
+        CHECK(r.valid && r.is_command);
+        CHECK(r.dfu_requested);
+    }
+
+    // --- BulbCommand not addressed to us: valid + seq tracked, but no effect ---
+    {
+        size_t len = build_cmd_frame(buf, 102, MY_ID + 1, 0, PROTO_CMD_ENTER_DFU, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command not for us:\n");
+        CHECK(r.valid);
+        CHECK(r.is_command);
+        CHECK(r.seq == 102);
+        CHECK(!r.dfu_requested);
+        CHECK(!r.has_config);
+    }
+
+    // --- BulbCommand SetConfig (0x04/0x01) addressed to us ---
+    {
+        uint8_t payload[PROTO_SETCONFIG_HDR_SIZE + 4];
+        payload[0] = 0x31; payload[1] = 0x00;  // key = 0x0031 (little-endian)
+        payload[2] = 4;                          // length
+        payload[3] = 0xDE; payload[4] = 0xAD; payload[5] = 0xBE; payload[6] = 0xEF;
+        size_t len = build_cmd_frame(buf, 103, MY_ID, 0, PROTO_CMD_SET_CONFIG,
+                                     payload, sizeof(payload));
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command SetConfig for us:\n");
+        CHECK(r.valid && r.is_command);
+        CHECK(r.seq == 103);
+        CHECK(!r.dfu_requested);
+        CHECK(r.has_config);
+        CHECK(r.config_key == 0x0031);
+        CHECK(r.config_len == 4);
+        CHECK(r.config_value != NULL);
+        CHECK(r.config_value[0] == 0xDE && r.config_value[3] == 0xEF);
+    }
+
+    // --- SetConfig with a truncated value is rejected (effect only) ---
+    {
+        uint8_t payload[PROTO_SETCONFIG_HDR_SIZE + 2];
+        payload[0] = 0x31; payload[1] = 0x00;
+        payload[2] = 4;                          // claims 4 value bytes...
+        payload[3] = 0x01; payload[4] = 0x02;    // ...but only 2 present
+        size_t len = build_cmd_frame(buf, 104, MY_ID, 0, PROTO_CMD_SET_CONFIG,
+                                     payload, sizeof(payload));
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command SetConfig truncated value:\n");
+        CHECK(r.valid && r.is_command);  // still a valid command (seq tracked)
+        CHECK(!r.has_config);            // but no config effect
+    }
+
+    // --- SetConfig value longer than we accept is rejected ---
+    {
+        uint8_t payload[PROTO_SETCONFIG_HDR_SIZE];
+        payload[0] = 0x31; payload[1] = 0x00;
+        payload[2] = PROTO_CONFIG_VALUE_MAX + 1;  // too long
+        size_t len = build_cmd_frame(buf, 105, MY_ID, 0, PROTO_CMD_SET_CONFIG,
+                                     payload, sizeof(payload));
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command SetConfig over-long value:\n");
+        CHECK(r.valid && r.is_command);
+        CHECK(!r.has_config);
+    }
+
+    // --- unknown command: valid + seq tracked, no effect ---
+    {
+        size_t len = build_cmd_frame(buf, 106, MY_ID, 0, 0x7F, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("unknown command:\n");
+        CHECK(r.valid && r.is_command && r.seq == 106);
+        CHECK(!r.dfu_requested && !r.has_config);
+    }
+
+    // --- BulbCommand with a truncated fixed header is rejected ---
+    {
+        uint8_t pkt[1] = {PROTO_TAG_BULB_COMMAND};  // tag only, no seq/addr/cmd
+        size_t len = wrap_beacon(buf, pkt, sizeof(pkt));
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command truncated header:\n");
         CHECK(!r.valid);
     }
 

@@ -21,6 +21,24 @@
 extern "C" {
 #endif
 
+// Wire tags: the 16-bit key identifiers used by the SetConfig BulbCommand
+// (spec 0x04 / cmd 0x01). Stable across firmware versions; a key's value type
+// never changes once assigned. Grouped loosely by area. These map to cfg_key_t
+// via the descriptor table in bulb_config.c and are the identity callers use
+// with bulb_config_set_raw().
+#define CFG_TAG_BULB_ID      0x0001u
+#define CFG_TAG_DEFAULT_R    0x0010u
+#define CFG_TAG_DEFAULT_G    0x0011u
+#define CFG_TAG_DEFAULT_B    0x0012u
+#define CFG_TAG_DEFAULT_WW   0x0013u
+#define CFG_TAG_DEFAULT_CW   0x0014u
+#define CFG_TAG_FALLBACK_MS  0x0020u
+#define CFG_TAG_WIFI_CHANNEL 0x0021u
+#define CFG_TAG_DUTY_CURVE   0x0030u
+#define CFG_TAG_GAMMA        0x0031u
+#define CFG_TAG_DFU_SSID     0x0040u
+#define CFG_TAG_DFU_PASS     0x0041u
+
 // Stable identity for each tunable. The numeric id is a compile-time index into
 // the RAM cache and descriptor table; it never touches flash. The on-flash
 // identity is the NVS string key in the descriptor.
@@ -60,6 +78,13 @@ esp_err_t bulb_config_set_u8(cfg_key_t k, uint8_t v);
 esp_err_t bulb_config_set_u32(cfg_key_t k, uint32_t v);
 esp_err_t bulb_config_set_float(cfg_key_t k, float v);
 esp_err_t bulb_config_set_str(cfg_key_t k, const char *v);
+
+// Set a key identified by its 16-bit wire tag (CFG_TAG_*) from raw bytes, as
+// delivered by a SetConfig BulbCommand. The byte length must match the key's
+// type (1 for u8, 4 for u32/float, up to 63 for strings); a mismatch or unknown
+// tag is rejected. Updates the RAM cache and persists to NVS. Returns ESP_OK,
+// ESP_ERR_NVS_NOT_FOUND (unknown tag), or ESP_ERR_INVALID_SIZE (bad length).
+esp_err_t bulb_config_set_raw(uint16_t tag, const void *value, uint8_t len);
 
 #ifdef __cplusplus
 }

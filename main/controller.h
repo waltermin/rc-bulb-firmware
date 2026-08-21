@@ -23,6 +23,12 @@ void controller_notify_entry(float r, float g, float b, float ww, float cw);
 // Post a DFU request (safe to call from the promiscuous RX callback context).
 void controller_notify_dfu(void);
 
+// Post a config write (from a SetConfig BulbCommand): `key` is the 16-bit wire
+// tag, `value`/`len` the raw bytes. Applied on the controller task (which may
+// touch flash), not in the RX callback. `value` is copied; safe to call from the
+// promiscuous RX callback context. Non-blocking; drops if the queue is full.
+void controller_notify_set_config(uint16_t key, const uint8_t *value, uint8_t len);
+
 #ifdef __cplusplus
 }
 #endif

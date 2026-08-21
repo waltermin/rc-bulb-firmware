@@ -9,6 +9,12 @@ static const bulb_parse_result_t INVALID = {
     .dfu_requested = false,
     .has_entry = false,
     .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
+    .is_command = false,
+    .seq = 0,
+    .has_config = false,
+    .config_key = 0,
+    .config_len = 0,
+    .config_value = NULL,
 };
 
 // 802.11 Frame Control (first octet): [subtype:4][type:2][version:2].
@@ -19,13 +25,39 @@ static inline bool is_beacon(uint8_t fc0) {
     return (fc0 & 0xFCu) == 0x80u;
 }
 
-// Read a little-endian IEEE-754 float from a possibly-unaligned wire pointer.
+// Read little-endian scalars from a possibly-unaligned wire pointer.
+static inline uint16_t read_u16_le(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static inline uint32_t read_u32_le(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 static inline float read_f32_le(const uint8_t *p) {
-    uint32_t bits = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    uint32_t bits = read_u32_le(p);
     float f;
     memcpy(&f, &bits, sizeof f);
     return f;
+}
+
+// Scan a BulbEntry table for the first entry addressed to my_id and, if found,
+// fill out->{has_entry, r..cw} with its u8 channels scaled to [0,1].
+static void scan_entries(const uint8_t *entries, uint8_t entry_count,
+                         uint8_t my_id, bulb_parse_result_t *out) {
+    for (uint8_t i = 0; i < entry_count; i++) {
+        const uint8_t *e = entries + (size_t)i * PROTO_ENTRY_SIZE;
+        if (e[0] == my_id) {
+            out->has_entry = true;
+            out->r  = e[1] / 255.0f;
+            out->g  = e[2] / 255.0f;
+            out->b  = e[3] / 255.0f;
+            out->ww = e[4] / 255.0f;
+            out->cw = e[5] / 255.0f;
+            return;
+        }
+    }
 }
 
 // Clamp a wire-supplied color channel into the [0,1] duty range the controller
@@ -41,7 +73,9 @@ static inline float clamp01(float v) {
 // Each receives `pkt` pointing at the packet tag byte and `pkt_len` bytes
 // available from the tag through the end of the IE payload.
 
-// 0x01 LightUpdate: [tag, control_flags, control_data, entry_count, entries...].
+// 0x01 LightUpdate (deprecated): [tag, control_flags, control_data, entry_count,
+// entries...]. Compiled only when legacy processing is enabled.
+#if PROTO_ENABLE_LEGACY_LIGHT_UPDATE
 static bulb_parse_result_t parse_light_update(const uint8_t *pkt, size_t pkt_len,
                                               uint8_t my_id) {
     if (pkt_len < PROTO_LIGHT_UPDATE_HDR_SIZE) {
@@ -62,26 +96,90 @@ static bulb_parse_result_t parse_light_update(const uint8_t *pkt, size_t pkt_len
         return INVALID;
     }
 
-    bulb_parse_result_t out = {
-        .valid = true,
-        .dfu_requested = (control_flags == PROTO_CTRL_FLAG_DFU) && (control_data == my_id),
-        .has_entry = false,
-        .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
-    };
+    bulb_parse_result_t out = INVALID;
+    out.valid = true;
+    out.dfu_requested = (control_flags == PROTO_CTRL_FLAG_DFU) && (control_data == my_id);
 
-    // Scan entries for the first one addressed to us.
-    const uint8_t *entries = pkt + PROTO_LIGHT_UPDATE_HDR_SIZE;
-    for (uint8_t i = 0; i < entry_count; i++) {
-        const uint8_t *e = entries + (size_t)i * PROTO_ENTRY_SIZE;
-        if (e[0] == my_id) {
-            out.has_entry = true;
-            out.r  = e[1] / 255.0f;
-            out.g  = e[2] / 255.0f;
-            out.b  = e[3] / 255.0f;
-            out.ww = e[4] / 255.0f;
-            out.cw = e[5] / 255.0f;
+    scan_entries(pkt + PROTO_LIGHT_UPDATE_HDR_SIZE, entry_count, my_id, &out);
+    return out;
+}
+#endif  // PROTO_ENABLE_LEGACY_LIGHT_UPDATE
+
+// 0x03 LightUpdateV2: [tag, entry_count, entries...]. Same entry table as 0x01
+// but with the control/DFU fields dropped.
+static bulb_parse_result_t parse_light_update_v2(const uint8_t *pkt, size_t pkt_len,
+                                                 uint8_t my_id) {
+    if (pkt_len < PROTO_LIGHT_UPDATE_V2_HDR_SIZE) {
+        return INVALID;
+    }
+
+    const uint8_t entry_count = pkt[1];
+    if (entry_count > PROTO_MAX_ENTRIES) {
+        return INVALID;
+    }
+
+    const size_t need = PROTO_LIGHT_UPDATE_V2_HDR_SIZE + (size_t)entry_count * PROTO_ENTRY_SIZE;
+    if (need > pkt_len) {
+        return INVALID;
+    }
+
+    bulb_parse_result_t out = INVALID;
+    out.valid = true;
+    scan_entries(pkt + PROTO_LIGHT_UPDATE_V2_HDR_SIZE, entry_count, my_id, &out);
+    return out;
+}
+
+// 0x04 BulbCommand: [tag, seq(u32), start(u8), bounds(u8), cmd(u32), payload...].
+// Marks the packet as a command and exposes seq unconditionally (the caller does
+// the highest-seq anti-replay gate). The command effect (dfu_requested /
+// has_config) is populated only when my_id falls in [start, start + bounds].
+static bulb_parse_result_t parse_bulb_command(const uint8_t *pkt, size_t pkt_len,
+                                              uint8_t my_id) {
+    if (pkt_len < PROTO_BULB_CMD_HDR_SIZE) {
+        return INVALID;
+    }
+
+    const uint32_t seq = read_u32_le(pkt + 1);
+    const uint8_t start = pkt[5];
+    const uint8_t bounds = pkt[6];
+    const uint8_t cmd = pkt[7];
+
+    bulb_parse_result_t out = INVALID;
+    out.valid = true;
+    out.is_command = true;
+    out.seq = seq;
+
+    // Addressing: inclusive range [start, start + bounds]; compute in 32-bit to
+    // avoid u8 wraparound. Not for us -> valid command (seq tracked), no effect.
+    if (my_id < start || (uint32_t)my_id > (uint32_t)start + (uint32_t)bounds) {
+        return out;
+    }
+
+    switch (cmd) {
+        case PROTO_CMD_ENTER_DFU:
+            out.dfu_requested = true;
+            break;
+        case PROTO_CMD_SET_CONFIG: {
+            const size_t base = PROTO_BULB_CMD_HDR_SIZE;  // key/length start here
+            if (pkt_len < base + PROTO_SETCONFIG_HDR_SIZE) {
+                break;  // header truncated; ignore effect but keep seq
+            }
+            const uint16_t key = read_u16_le(pkt + base);
+            const uint8_t length = pkt[base + 2];
+            if (length > PROTO_CONFIG_VALUE_MAX) {
+                break;  // longer than we store; reject the write
+            }
+            if (pkt_len < base + PROTO_SETCONFIG_HDR_SIZE + length) {
+                break;  // value truncated
+            }
+            out.has_config = true;
+            out.config_key = key;
+            out.config_len = length;
+            out.config_value = pkt + base + PROTO_SETCONFIG_HDR_SIZE;
             break;
         }
+        default:
+            break;  // unknown cmd: valid command, no effect
     }
 
     return out;
@@ -166,11 +264,17 @@ bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len
     const size_t pkt_len = ie_len - VENDOR_OUI_LEN;  // >= PROTO_TAG_SIZE (checked above)
 
     switch (pkt[0]) {
+#if PROTO_ENABLE_LEGACY_LIGHT_UPDATE
         case PROTO_TAG_LIGHT_UPDATE:
             return parse_light_update(pkt, pkt_len, my_id);
+#endif
         case PROTO_TAG_PRECISE_LIGHT_UPDATE:
             return parse_precise_light_update(pkt, pkt_len, my_id);
+        case PROTO_TAG_LIGHT_UPDATE_V2:
+            return parse_light_update_v2(pkt, pkt_len, my_id);
+        case PROTO_TAG_BULB_COMMAND:
+            return parse_bulb_command(pkt, pkt_len, my_id);
         default:
-            return INVALID;  // unknown packet tag
+            return INVALID;  // unknown or disabled packet tag
     }
 }

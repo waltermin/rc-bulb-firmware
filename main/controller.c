@@ -2,6 +2,8 @@
 
 #include "controller.h"
 
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -9,6 +11,7 @@
 
 #include "config.h"
 #include "bulb_config.h"
+#include "protocol.h"
 #include "pwm_output.h"
 #include "dfu.h"
 
@@ -17,11 +20,21 @@ static const char *TAG = "controller";
 typedef enum {
     MSG_APPLY = 0,
     MSG_DFU = 1,
+    MSG_SET_CONFIG = 2,
 } ctrl_msg_type_t;
 
 typedef struct {
     uint8_t type;
-    float r, g, b, ww, cw;  // normalized [0,1] duty cycles
+    union {
+        struct {
+            float r, g, b, ww, cw;  // normalized [0,1] duty cycles (MSG_APPLY)
+        } color;
+        struct {
+            uint16_t key;
+            uint8_t  len;
+            uint8_t  value[PROTO_CONFIG_VALUE_MAX];
+        } cfg;                      // MSG_SET_CONFIG
+    } u;
 } ctrl_msg_t;
 
 static QueueHandle_t s_queue;
@@ -45,11 +58,19 @@ static void controller_task(void *arg) {
                 // longer needed once DFU begins, so it stands down.
                 dfu_start(s_my_id);
                 vTaskDelete(NULL);
+            } else if (msg.type == MSG_SET_CONFIG) {
+                // Config writes touch flash, so they happen here rather than in
+                // the RX callback. Does not affect light state / fallback timer.
+                esp_err_t err = bulb_config_set_raw(msg.u.cfg.key, msg.u.cfg.value, msg.u.cfg.len);
+                ESP_LOGI(TAG, "set config key 0x%04x (%u bytes) -> %d",
+                         msg.u.cfg.key, msg.u.cfg.len, err);
+            } else {
+                // MSG_APPLY — colors arrive already normalized to [0,1] by the parser.
+                pwm_output_set(msg.u.color.r, msg.u.color.g, msg.u.color.b,
+                               msg.u.color.ww, msg.u.color.cw);
+                last_seen = xTaskGetTickCount();
+                at_default = false;
             }
-            // MSG_APPLY — colors arrive already normalized to [0,1] by the parser.
-            pwm_output_set(msg.r, msg.g, msg.b, msg.ww, msg.cw);
-            last_seen = xTaskGetTickCount();
-            at_default = false;
         }
 
         // Fallback check (runs on every wake, message or timeout).
@@ -75,7 +96,8 @@ void controller_notify_entry(float r, float g, float b, float ww, float cw) {
     if (s_queue == NULL) {
         return;
     }
-    ctrl_msg_t msg = {.type = MSG_APPLY, .r = r, .g = g, .b = b, .ww = ww, .cw = cw};
+    ctrl_msg_t msg = {.type = MSG_APPLY,
+                      .u.color = {.r = r, .g = g, .b = b, .ww = ww, .cw = cw}};
     // Drop if full: a newer beacon will arrive shortly anyway.
     xQueueSend(s_queue, &msg, 0);
 }
@@ -85,5 +107,21 @@ void controller_notify_dfu(void) {
         return;
     }
     ctrl_msg_t msg = {.type = MSG_DFU};
+    xQueueSend(s_queue, &msg, 0);
+}
+
+void controller_notify_set_config(uint16_t key, const uint8_t *value, uint8_t len) {
+    if (s_queue == NULL) {
+        return;
+    }
+    if (len > PROTO_CONFIG_VALUE_MAX) {
+        return;  // parser already caps this, but never overrun the buffer
+    }
+    ctrl_msg_t msg = {.type = MSG_SET_CONFIG};
+    msg.u.cfg.key = key;
+    msg.u.cfg.len = len;
+    if (len > 0 && value != NULL) {
+        memcpy(msg.u.cfg.value, value, len);
+    }
     xQueueSend(s_queue, &msg, 0);
 }

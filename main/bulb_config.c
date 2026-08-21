@@ -29,6 +29,7 @@ static const char *TAG = "config";
 typedef enum { CFG_T_U8, CFG_T_U32, CFG_T_FLOAT, CFG_T_STR } cfg_type_t;
 
 typedef struct {
+    uint16_t    tag;  // 16-bit wire identifier (CFG_TAG_*), used by set_raw
     const char *ns;   // NVS namespace
     const char *key;  // NVS key, <= 15 chars (NVS limit)
     cfg_type_t  type;
@@ -40,21 +41,22 @@ typedef struct {
     } def;
 } cfg_desc_t;
 
-// Adding a key: add a cfg_key_t enum value (header) and a row here. Defaults are
-// the config.h macros — the single source of truth for absent-key values.
+// Adding a key: add a cfg_key_t enum value + a CFG_TAG_* (header) and a row here.
+// Defaults are the config.h macros — the single source of truth for absent-key
+// values.
 static const cfg_desc_t CFG_DESC[CFG_KEY_COUNT] = {
-    [CFG_BULB_ID]      = {NS_BULB, "bulb_id",     CFG_T_U8,    .def.u8  = BULB_DEFAULT_ID},
-    [CFG_DEFAULT_R]    = {NS_CFG,  "def_r",       CFG_T_FLOAT, .def.f   = DEFAULT_R},
-    [CFG_DEFAULT_G]    = {NS_CFG,  "def_g",       CFG_T_FLOAT, .def.f   = DEFAULT_G},
-    [CFG_DEFAULT_B]    = {NS_CFG,  "def_b",       CFG_T_FLOAT, .def.f   = DEFAULT_B},
-    [CFG_DEFAULT_WW]   = {NS_CFG,  "def_ww",      CFG_T_FLOAT, .def.f   = DEFAULT_WW},
-    [CFG_DEFAULT_CW]   = {NS_CFG,  "def_cw",      CFG_T_FLOAT, .def.f   = DEFAULT_CW},
-    [CFG_FALLBACK_MS]  = {NS_CFG,  "fallback_ms", CFG_T_U32,   .def.u32 = FALLBACK_TIMEOUT_MS},
-    [CFG_WIFI_CHANNEL] = {NS_CFG,  "wifi_chan",   CFG_T_U8,    .def.u8  = WIFI_CHANNEL},
-    [CFG_DUTY_CURVE]   = {NS_CFG,  "duty_curve",  CFG_T_U8,    .def.u8  = PWM_DUTY_CURVE},
-    [CFG_GAMMA]        = {NS_CFG,  "gamma",       CFG_T_FLOAT, .def.f   = PWM_GAMMA},
-    [CFG_DFU_SSID]     = {NS_CFG,  "dfu_ssid",    CFG_T_STR,   .def.str = DFU_AP_SSID},
-    [CFG_DFU_PASS]     = {NS_CFG,  "dfu_pass",    CFG_T_STR,   .def.str = DFU_AP_PASS},
+    [CFG_BULB_ID]      = {CFG_TAG_BULB_ID,      NS_BULB, "bulb_id",     CFG_T_U8,    .def.u8  = BULB_DEFAULT_ID},
+    [CFG_DEFAULT_R]    = {CFG_TAG_DEFAULT_R,    NS_CFG,  "def_r",       CFG_T_FLOAT, .def.f   = DEFAULT_R},
+    [CFG_DEFAULT_G]    = {CFG_TAG_DEFAULT_G,    NS_CFG,  "def_g",       CFG_T_FLOAT, .def.f   = DEFAULT_G},
+    [CFG_DEFAULT_B]    = {CFG_TAG_DEFAULT_B,    NS_CFG,  "def_b",       CFG_T_FLOAT, .def.f   = DEFAULT_B},
+    [CFG_DEFAULT_WW]   = {CFG_TAG_DEFAULT_WW,   NS_CFG,  "def_ww",      CFG_T_FLOAT, .def.f   = DEFAULT_WW},
+    [CFG_DEFAULT_CW]   = {CFG_TAG_DEFAULT_CW,   NS_CFG,  "def_cw",      CFG_T_FLOAT, .def.f   = DEFAULT_CW},
+    [CFG_FALLBACK_MS]  = {CFG_TAG_FALLBACK_MS,  NS_CFG,  "fallback_ms", CFG_T_U32,   .def.u32 = FALLBACK_TIMEOUT_MS},
+    [CFG_WIFI_CHANNEL] = {CFG_TAG_WIFI_CHANNEL, NS_CFG,  "wifi_chan",   CFG_T_U8,    .def.u8  = WIFI_CHANNEL},
+    [CFG_DUTY_CURVE]   = {CFG_TAG_DUTY_CURVE,   NS_CFG,  "duty_curve",  CFG_T_U8,    .def.u8  = PWM_DUTY_CURVE},
+    [CFG_GAMMA]        = {CFG_TAG_GAMMA,        NS_CFG,  "gamma",       CFG_T_FLOAT, .def.f   = PWM_GAMMA},
+    [CFG_DFU_SSID]     = {CFG_TAG_DFU_SSID,     NS_CFG,  "dfu_ssid",    CFG_T_STR,   .def.str = DFU_AP_SSID},
+    [CFG_DFU_PASS]     = {CFG_TAG_DFU_PASS,     NS_CFG,  "dfu_pass",    CFG_T_STR,   .def.str = DFU_AP_PASS},
 };
 
 // RAM cache. Scalars sit in a 4-byte-aligned union (single-word loads on Xtensa
@@ -210,4 +212,34 @@ esp_err_t bulb_config_set_str(cfg_key_t k, const char *v) {
     strncpy(s_cache[k].str, v, CFG_STR_MAX - 1);
     s_cache[k].str[CFG_STR_MAX - 1] = '\0';
     return persist(k);
+}
+
+esp_err_t bulb_config_set_raw(uint16_t tag, const void *value, uint8_t len) {
+    for (cfg_key_t k = 0; k < CFG_KEY_COUNT; k++) {
+        if (CFG_DESC[k].tag != tag) {
+            continue;
+        }
+        cfg_entry_t *e = &s_cache[k];
+        switch (CFG_DESC[k].type) {
+            case CFG_T_U8:
+                if (len != sizeof(uint8_t)) return ESP_ERR_INVALID_SIZE;
+                memcpy(&e->scalar.u8, value, sizeof(uint8_t));
+                break;
+            case CFG_T_U32:
+                if (len != sizeof(uint32_t)) return ESP_ERR_INVALID_SIZE;
+                memcpy(&e->scalar.u32, value, sizeof(uint32_t));
+                break;
+            case CFG_T_FLOAT:
+                if (len != sizeof(float)) return ESP_ERR_INVALID_SIZE;
+                memcpy(&e->scalar.f, value, sizeof(float));
+                break;
+            case CFG_T_STR:
+                if (len >= CFG_STR_MAX) return ESP_ERR_INVALID_SIZE;  // room for NUL
+                memcpy(e->str, value, len);
+                e->str[len] = '\0';
+                break;
+        }
+        return persist(k);
+    }
+    return ESP_ERR_NVS_NOT_FOUND;  // no key with this tag
 }

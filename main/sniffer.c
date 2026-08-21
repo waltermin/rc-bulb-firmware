@@ -16,6 +16,11 @@ static const char *TAG = "sniffer";
 
 static uint8_t s_my_id;
 
+// Highest BulbCommand seq processed since power-on (anti-replay). The RX callback
+// is single-threaded (WiFi task), so plain statics need no locking.
+static uint32_t s_highest_seq;
+static bool s_seq_seen;
+
 // Extract the 802.11 frame length from the RX control metadata. Beacons are
 // sent at legacy rates, so legacy_length is the payload length; fall back to
 // HT_length for HT frames.
@@ -34,6 +39,25 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (!r.valid) {
         return;
     }
+
+    if (r.is_command) {
+        // Anti-replay: act only on the first sighting of a new-highest seq.
+        // Retransmissions of the same command carry the same seq and are ignored.
+        if (s_seq_seen && r.seq <= s_highest_seq) {
+            return;
+        }
+        s_highest_seq = r.seq;
+        s_seq_seen = true;
+
+        if (r.dfu_requested) {
+            controller_notify_dfu();
+        } else if (r.has_config) {
+            controller_notify_set_config(r.config_key, r.config_value, r.config_len);
+        }
+        return;  // command handled (or not addressed to us)
+    }
+
+    // Color-bearing packets (legacy 0x01 DFU field, 0x02, 0x03).
     if (r.dfu_requested) {
         controller_notify_dfu();
         return;  // ignore any color in the same frame; DFU takes over
