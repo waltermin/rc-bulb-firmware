@@ -40,3 +40,27 @@ struct PreciseLightUpdate {
     color_cw: f32,
 }
 ```
+
+## `0x03` - LightUpdateV2
+
+Similiar to LightUpdate, but 
+
+```
+struct LightUpdatePacket {
+    // if flags == 1, then control_data is the ID of a bulb we would like to enter DFU mode
+    control_flags: u8,
+    control_data: u8,
+
+    entry_count: u8, // how many entries are in the following array, max of 11 (esp8266 firmware limit)
+    entries: [BulbEntry; entry_count],
+}
+
+struct BulbEntry {
+    bulb_id: u8,
+    color_r: u8,
+    color_g: u8,
+    color_b: u8,
+    color_ww: u8,
+    color_cw: u8,
+}
+```

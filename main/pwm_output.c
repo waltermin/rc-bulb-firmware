@@ -12,6 +12,7 @@
 #include "pwm_output.h"
 
 #include <math.h>
+#include <stdbool.h>
 
 #include "driver/pwm.h"
 #include "esp_log.h"
@@ -156,14 +157,44 @@ static pwm_frame_t duties_to_frame(color5_t duties) {
 
 // ---- driver plumbing --------------------------------------------------------
 
+// Last frame actually pushed to the driver, so identical frames can be skipped.
+// s_have_last is cleared to force the next commit through (e.g. after pwm_stop()
+// tears down the timer in pwm_output_start_after_radio()).
+static bool s_have_last;
+static pwm_frame_t s_last;
+
+static bool frames_equal(const pwm_frame_t *a, const pwm_frame_t *b) {
+    if (a->period_us != b->period_us) {
+        return false;
+    }
+    for (int i = 0; i < PWM_CHANNELS; i++) {
+        if (a->duties[i] != b->duties[i] || a->phases[i] != b->phases[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Push a computed frame to the driver and start output. The SDK's pwm_set_*
 // calls copy the values into the driver's internal state, so the frame does not
 // need to outlive this call; pwm_start() commits the new period/duty/phase.
+//
+// Skip the commit entirely when the frame is unchanged. pwm_start() rebuilds the
+// edge table and re-publishes it to the IRAM timer ISR through a non-atomic,
+// unbarriered double-buffer handshake; if that publish races the ISR, the ISR
+// can latch a torn/stale buffer and drive a channel to the wrong level for up to
+// one period — a brief full-brightness flash. Re-applying an identical frame
+// (e.g. a constant color streamed at 100 Hz) buys nothing but that exposure.
 static void commit_frame(pwm_frame_t *f) {
+    if (s_have_last && frames_equal(f, &s_last)) {
+        return;
+    }
     pwm_set_period(f->period_us);
     pwm_set_phases(f->phases);
     pwm_set_duties(f->duties);
     pwm_start();
+    s_last = *f;
+    s_have_last = true;
 }
 
 void pwm_output_set(float r, float g, float b, float ww, float cw) {
@@ -218,6 +249,7 @@ void pwm_output_start_after_radio(void) {
     // internal start_flag so the pwm_start() inside pwm_output_set_default()
     // re-runs pwm_timer_start() — this time under the live WDEV clock.
     pwm_stop(0x0);              // all channels low; start_flag -> 0
+    s_have_last = false;        // force the commit below through so pwm_start re-arms
     pwm_output_set_default();   // re-applies default duties and truly starts PWM
     ESP_LOGI(TAG, "pwm re-armed after radio start");
 }
