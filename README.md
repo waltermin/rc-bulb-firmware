@@ -7,9 +7,11 @@ purpose-built control path:
 - **Instant default color** — the LEDs are driven to a configurable RGBWW value
   as the first action in `app_main`, before any radio is powered.
 - **Broadcast control** — the bulb listens in **promiscuous mode** for 802.11
-  beacons carrying a vendor-specific IE (OUI `52 43 68`). Each beacon holds a
-  `LightUpdatePacket` with up to 11 `BulbEntry` records; the bulb applies the
-  entry whose `bulb_id` matches its own NVS-provisioned `u8` id.
+  beacons carrying a vendor-specific IE (OUI `52 43 68`). The first payload byte
+  after the OUI is a **packet tag** selecting the format that follows:
+  `0x01` **LightUpdate** holds up to 11 `BulbEntry` records with `u8` channels;
+  `0x02` **PreciseLightUpdate** targets one bulb with `f32` channels. Either way
+  the bulb applies the color whose `bulb_id` matches its own NVS-provisioned id.
 - **Fallback** — if no entry addressed to this bulb arrives within
   `FALLBACK_TIMEOUT_MS` (default 15 s), it reverts to the startup default.
 - **DFU / OTA** — a beacon with `control_flags == 1` and `control_data == <my id>`

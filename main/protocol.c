@@ -2,6 +2,8 @@
 
 #include "protocol.h"
 
+#include <string.h>  // memcpy
+
 static const bulb_parse_result_t INVALID = {
     .valid = false,
     .dfu_requested = false,
@@ -15,6 +17,102 @@ static const bulb_parse_result_t INVALID = {
 // requiring management/beacon.
 static inline bool is_beacon(uint8_t fc0) {
     return (fc0 & 0xFCu) == 0x80u;
+}
+
+// Read a little-endian IEEE-754 float from a possibly-unaligned wire pointer.
+static inline float read_f32_le(const uint8_t *p) {
+    uint32_t bits = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+// Clamp a wire-supplied color channel into the [0,1] duty range the controller
+// expects, mapping NaN to 0 so a malformed float can never reach the PWM math.
+static inline float clamp01(float v) {
+    if (v != v) return 0.0f;   // NaN
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+// ---- per-packet-type parsers -----------------------------------------------
+// Each receives `pkt` pointing at the packet tag byte and `pkt_len` bytes
+// available from the tag through the end of the IE payload.
+
+// 0x01 LightUpdate: [tag, control_flags, control_data, entry_count, entries...].
+static bulb_parse_result_t parse_light_update(const uint8_t *pkt, size_t pkt_len,
+                                              uint8_t my_id) {
+    if (pkt_len < PROTO_LIGHT_UPDATE_HDR_SIZE) {
+        return INVALID;
+    }
+
+    const uint8_t control_flags = pkt[1];
+    const uint8_t control_data = pkt[2];
+    const uint8_t entry_count = pkt[3];
+
+    if (entry_count > PROTO_MAX_ENTRIES) {
+        return INVALID;
+    }
+
+    // The declared entries must fit within the packet payload.
+    const size_t need = PROTO_LIGHT_UPDATE_HDR_SIZE + (size_t)entry_count * PROTO_ENTRY_SIZE;
+    if (need > pkt_len) {
+        return INVALID;
+    }
+
+    bulb_parse_result_t out = {
+        .valid = true,
+        .dfu_requested = (control_flags == PROTO_CTRL_FLAG_DFU) && (control_data == my_id),
+        .has_entry = false,
+        .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
+    };
+
+    // Scan entries for the first one addressed to us.
+    const uint8_t *entries = pkt + PROTO_LIGHT_UPDATE_HDR_SIZE;
+    for (uint8_t i = 0; i < entry_count; i++) {
+        const uint8_t *e = entries + (size_t)i * PROTO_ENTRY_SIZE;
+        if (e[0] == my_id) {
+            out.has_entry = true;
+            out.r  = e[1] / 255.0f;
+            out.g  = e[2] / 255.0f;
+            out.b  = e[3] / 255.0f;
+            out.ww = e[4] / 255.0f;
+            out.cw = e[5] / 255.0f;
+            break;
+        }
+    }
+
+    return out;
+}
+
+// 0x02 PreciseLightUpdate: [tag, bulb_id, f32 r, g, b, ww, cw]. Addresses a
+// single bulb and carries no control/DFU fields.
+static bulb_parse_result_t parse_precise_light_update(const uint8_t *pkt, size_t pkt_len,
+                                                      uint8_t my_id) {
+    if (pkt_len < PROTO_PRECISE_SIZE) {
+        return INVALID;
+    }
+
+    bulb_parse_result_t out = {
+        .valid = true,
+        .dfu_requested = false,
+        .has_entry = false,
+        .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
+    };
+
+    if (pkt[1] == my_id) {
+        const uint8_t *c = pkt + PROTO_TAG_SIZE + 1;  // first float
+        out.has_entry = true;
+        out.r  = clamp01(read_f32_le(c +  0));
+        out.g  = clamp01(read_f32_le(c +  4));
+        out.b  = clamp01(read_f32_le(c +  8));
+        out.ww = clamp01(read_f32_le(c + 12));
+        out.cw = clamp01(read_f32_le(c + 16));
+    }
+
+    return out;
 }
 
 bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len, uint8_t my_id) {
@@ -39,9 +137,8 @@ bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len
     }
     const size_t ie_len = ie[1];  // length of IE data (OUI + payload)
 
-    // IE must contain at least the OUI + a full LightUpdatePacket header, and
-    // must fit within the frame.
-    if (ie_len < VENDOR_OUI_LEN + PROTO_HEADER_SIZE) {
+    // IE must contain at least the OUI + a packet tag, and must fit in the frame.
+    if (ie_len < VENDOR_OUI_LEN + PROTO_TAG_SIZE) {
         return INVALID;
     }
     const size_t ie_end = ie_start + IEEE80211_IE_HDR_LEN + ie_len;
@@ -63,49 +160,17 @@ bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len
         return INVALID;
     }
 
-    // LightUpdatePacket begins right after the OUI.
+    // The packet begins right after the OUI: [packet_tag, ...]. Dispatch on the
+    // tag to the matching format parser.
     const uint8_t *pkt = oui + VENDOR_OUI_LEN;
-    const size_t pkt_len = ie_len - VENDOR_OUI_LEN;  // >= PROTO_HEADER_SIZE (checked above)
+    const size_t pkt_len = ie_len - VENDOR_OUI_LEN;  // >= PROTO_TAG_SIZE (checked above)
 
-    const uint8_t version = pkt[0];
-    const uint8_t control_flags = pkt[1];
-    const uint8_t control_data = pkt[2];
-    const uint8_t entry_count = pkt[3];
-
-    if (version != PROTO_VERSION) {
-        return INVALID;
+    switch (pkt[0]) {
+        case PROTO_TAG_LIGHT_UPDATE:
+            return parse_light_update(pkt, pkt_len, my_id);
+        case PROTO_TAG_PRECISE_LIGHT_UPDATE:
+            return parse_precise_light_update(pkt, pkt_len, my_id);
+        default:
+            return INVALID;  // unknown packet tag
     }
-    if (entry_count > PROTO_MAX_ENTRIES) {
-        return INVALID;
-    }
-
-    // The declared entries must fit exactly-or-within the packet payload.
-    const size_t need = PROTO_HEADER_SIZE + (size_t)entry_count * PROTO_ENTRY_SIZE;
-    if (need > pkt_len) {
-        return INVALID;
-    }
-
-    bulb_parse_result_t out = {
-        .valid = true,
-        .dfu_requested = (control_flags == PROTO_CTRL_FLAG_DFU) && (control_data == my_id),
-        .has_entry = false,
-        .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
-    };
-
-    // Scan entries for the first one addressed to us.
-    const uint8_t *entries = pkt + PROTO_HEADER_SIZE;
-    for (uint8_t i = 0; i < entry_count; i++) {
-        const uint8_t *e = entries + (size_t)i * PROTO_ENTRY_SIZE;
-        if (e[0] == my_id) {
-            out.has_entry = true;
-            out.r = e[1];
-            out.g = e[2];
-            out.b = e[3];
-            out.ww = e[4];
-            out.cw = e[5];
-            break;
-        }
-    }
-
-    return out;
 }

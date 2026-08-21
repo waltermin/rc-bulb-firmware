@@ -2,10 +2,12 @@ PROTOCOL:
 
 Base station broadcasts 802.11 management frames, beacon, vendor specific (`0xDD`). OUI for the vendor specific frame is `[0x52, 0x43, 0x68]`. Ensure that this is the *only* IE in the packet, no others are allowed.
 
+Following the OUI is a 1-byte packet tag, which describes the format of the data to come.
+
+## `0x01` - LightUpdate
+
 ```
 struct LightUpdatePacket {
-    version: u8, // currently 0x01
-    
     // if flags == 1, then control_data is the ID of a bulb we would like to enter DFU mode
     control_flags: u8,
     control_data: u8,
@@ -24,4 +26,17 @@ struct BulbEntry {
 }
 ```
 
-When a bulb receives a management frame, it will scan the BulbEntry list until it finds an entry with `bulb_id` matching its own ID, and will then update itself with the new data.
+When a bulb receives a LightUpdate, it will scan the BulbEntry list until it finds an entry with `bulb_id` matching its own ID, and will then update itself with the new data.
+
+## `0x02` - PreciseLightUpdate
+
+```
+struct PreciseLightUpdate {
+    bulb_id: u8,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
+    color_ww: f32,
+    color_cw: f32,
+}
+```

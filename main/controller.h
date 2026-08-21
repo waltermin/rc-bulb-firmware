@@ -14,9 +14,11 @@ extern "C" {
 // sniffer does the id matching.
 void controller_start(uint8_t my_id);
 
-// Post a new color addressed to us (safe to call from the promiscuous RX
-// callback context). Non-blocking; drops if the queue is momentarily full.
-void controller_notify_entry(uint8_t r, uint8_t g, uint8_t b, uint8_t ww, uint8_t cw);
+// Post a new color addressed to us, as normalized duty cycles in [0.0, 1.0]
+// (the protocol parser has already scaled/clamped both packet types into this
+// range). Safe to call from the promiscuous RX callback context. Non-blocking;
+// drops if the queue is momentarily full.
+void controller_notify_entry(float r, float g, float b, float ww, float cw);
 
 // Post a DFU request (safe to call from the promiscuous RX callback context).
 void controller_notify_dfu(void);

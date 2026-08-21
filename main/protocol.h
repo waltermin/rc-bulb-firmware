@@ -15,17 +15,31 @@
 //               ├─ tag        1 byte  (0xDD)
 //               ├─ length     1 byte
 //               ├─ OUI        3 bytes (0x52 0x43 0x68)
-//               └─ payload = LightUpdatePacket
+//               └─ payload = { u8 packet_tag; ... }
 //
-//   struct LightUpdatePacket {
-//     u8 version;        // 0x01
-//     u8 control_flags;  // 1 => control_data is a bulb id to put into DFU mode
-//     u8 control_data;
-//     u8 entry_count;    // 0..11
-//     BulbEntry entries[entry_count];
-//   }
+// The first payload byte after the OUI is a packet tag that selects the format
+// of the bytes that follow. Two packet types are defined:
 //
-//   struct BulbEntry { u8 bulb_id, r, g, b, ww, cw; }  // 6 bytes
+//   0x01 LightUpdate — u8-per-channel colors, addressed by a table of entries:
+//     struct LightUpdatePacket {
+//       u8 packet_tag;     // 0x01
+//       u8 control_flags;  // 1 => control_data is a bulb id to put into DFU mode
+//       u8 control_data;
+//       u8 entry_count;    // 0..11
+//       BulbEntry entries[entry_count];
+//     }
+//     struct BulbEntry { u8 bulb_id, r, g, b, ww, cw; }  // 6 bytes
+//
+//   0x02 PreciseLightUpdate — one bulb, float32-per-channel colors:
+//     struct PreciseLightUpdate {
+//       u8  packet_tag;    // 0x02
+//       u8  bulb_id;
+//       f32 r, g, b, ww, cw;   // little-endian, nominally [0.0, 1.0]
+//     }
+//
+// Both packet types resolve to the same thing for a given bulb: either "no
+// update for me" or a normalized [0,1] color to apply. protocol_parse_beacon()
+// hides the wire encoding behind bulb_parse_result_t below.
 
 #ifndef BULB_PROTOCOL_H
 #define BULB_PROTOCOL_H
@@ -52,10 +66,20 @@ extern "C" {
 #define VENDOR_OUI_2 0x68u
 #define VENDOR_OUI_LEN 3u
 
-#define PROTO_VERSION 0x01u
+// Packet tags — the first payload byte after the OUI. See the wire-format
+// comment at the top of this file.
+#define PROTO_TAG_LIGHT_UPDATE 0x01u          // u8-per-channel table of entries
+#define PROTO_TAG_PRECISE_LIGHT_UPDATE 0x02u  // single bulb, f32-per-channel
+#define PROTO_TAG_SIZE 1u                     // width of the packet tag itself
+
 #define PROTO_MAX_ENTRIES 11u           // ESP8266 firmware / beacon-size limit
 #define PROTO_ENTRY_SIZE 6u             // bulb_id + 5 color channels
-#define PROTO_HEADER_SIZE 4u            // version + control_flags + control_data + entry_count
+
+// LightUpdate fixed header: packet_tag + control_flags + control_data + entry_count.
+#define PROTO_LIGHT_UPDATE_HDR_SIZE 4u
+// PreciseLightUpdate total size: packet_tag + bulb_id + 5 * f32.
+#define PROTO_PRECISE_CHANNELS 5u
+#define PROTO_PRECISE_SIZE (PROTO_TAG_SIZE + 1u + PROTO_PRECISE_CHANNELS * 4u)  // 22
 
 #define PROTO_CTRL_FLAG_DFU 0x01u       // control_flags value that requests DFU mode
 
@@ -63,9 +87,12 @@ extern "C" {
 
 typedef struct {
     bool valid;          // frame is a well-formed packet for our protocol
-    bool dfu_requested;  // control_flags==DFU && control_data==my_id
-    bool has_entry;      // an entry with bulb_id==my_id was present
-    uint8_t r, g, b, ww, cw;  // only meaningful when has_entry is true
+    bool dfu_requested;  // LightUpdate with control_flags==DFU && control_data==my_id
+    bool has_entry;      // a color addressed to my_id was present
+    // Color to apply, normalized to [0.0, 1.0], only meaningful when has_entry.
+    // LightUpdate's u8 channels are scaled by 1/255; PreciseLightUpdate's f32
+    // channels are passed through (clamped to [0,1], NaN treated as 0).
+    float r, g, b, ww, cw;
 } bulb_parse_result_t;
 
 // Parse a raw 802.11 frame (as delivered by the promiscuous RX path).

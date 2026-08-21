@@ -28,7 +28,7 @@
 #define FALLBACK_TIMEOUT_MS 15000
 
 // Fixed 802.11 channel the base station broadcasts on and we sniff on.
-#define WIFI_CHANNEL 1
+#define WIFI_CHANNEL 11
 
 // ---- PWM (match original Kauf bulb behavior) --------------------------------
 // GPIO assignments come from the stock kauf-bulb.yaml.

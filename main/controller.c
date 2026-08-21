@@ -20,7 +20,7 @@ typedef enum {
 
 typedef struct {
     uint8_t type;
-    uint8_t r, g, b, ww, cw;
+    float r, g, b, ww, cw;  // normalized [0,1] duty cycles
 } ctrl_msg_t;
 
 static QueueHandle_t s_queue;
@@ -44,12 +44,8 @@ static void controller_task(void *arg) {
                 dfu_start(s_my_id);
                 vTaskDelete(NULL);
             }
-            // MSG_APPLY — wire values are u8 (0..255); normalize to [0,1].
-            pwm_output_set(msg.r  / 255.0f,
-                           msg.g  / 255.0f,
-                           msg.b  / 255.0f,
-                           msg.ww / 255.0f,
-                           msg.cw / 255.0f);
+            // MSG_APPLY — colors arrive already normalized to [0,1] by the parser.
+            pwm_output_set(msg.r, msg.g, msg.b, msg.ww, msg.cw);
             last_seen = xTaskGetTickCount();
             at_default = false;
         }
@@ -73,7 +69,7 @@ void controller_start(uint8_t my_id) {
     xTaskCreate(controller_task, "controller", 4096, NULL, 5, NULL);
 }
 
-void controller_notify_entry(uint8_t r, uint8_t g, uint8_t b, uint8_t ww, uint8_t cw) {
+void controller_notify_entry(float r, float g, float b, float ww, float cw) {
     if (s_queue == NULL) {
         return;
     }
