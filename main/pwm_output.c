@@ -18,6 +18,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "bulb_config.h"
 
 static const char *TAG = "pwm";
 
@@ -97,12 +98,13 @@ static inline color5_t color5_clamp01(color5_t c) {
 }
 
 // A duty-response curve maps a normalized channel level in [0,1] to a normalized
-// duty in [0,1]. levels_to_duties() picks one via PWM_DUTY_CURVE (config.h).
-// Both are defined so either can be selected without touching this file.
+// duty in [0,1]. levels_to_duties() picks one at runtime via the CFG_DUTY_CURVE
+// config value. Both are always compiled so either can be selected without a
+// rebuild.
 
-// Power-law gamma: duty = level ^ PWM_GAMMA (identity when PWM_GAMMA == 1.0f).
-static inline float gamma_to_duty(float x) {
-    return powf(x, PWM_GAMMA);
+// Power-law gamma: duty = level ^ gamma (identity when gamma == 1.0f).
+static inline float gamma_to_duty(float x, float gamma) {
+    return powf(x, gamma);
 }
 
 // Perceptual (CIE L*) -> normalized duty cycle.
@@ -122,13 +124,15 @@ static inline float perceptual_to_duty(float x) {
 // and returns the whole 5-tuple, a replacement may also do cross-channel work
 // (white balancing, gamut mapping, ...) instead of a pure per-channel curve.
 static color5_t levels_to_duties(color5_t levels) {
+    // Read the curve selector and gamma once (cheap RAM-cache reads), then apply
+    // per channel.
+    const uint8_t curve = bulb_config_get_u8(CFG_DUTY_CURVE);
+    const float   gamma = bulb_config_get_float(CFG_GAMMA);
     color5_t duties;
     for (int i = 0; i < COLOR_COUNT; i++) {
-#if PWM_DUTY_CURVE == PWM_CURVE_PERCEPTUAL
-        duties.ch[i] = perceptual_to_duty(levels.ch[i]);
-#else
-        duties.ch[i] = gamma_to_duty(levels.ch[i]);
-#endif
+        duties.ch[i] = (curve == PWM_CURVE_PERCEPTUAL)
+                           ? perceptual_to_duty(levels.ch[i])
+                           : gamma_to_duty(levels.ch[i], gamma);
     }
     return duties;
 }
@@ -219,7 +223,11 @@ void pwm_output_set(float r, float g, float b, float ww, float cw) {
 }
 
 void pwm_output_set_default(void) {
-    pwm_output_set(DEFAULT_R, DEFAULT_G, DEFAULT_B, DEFAULT_WW, DEFAULT_CW);
+    pwm_output_set(bulb_config_get_float(CFG_DEFAULT_R),
+                   bulb_config_get_float(CFG_DEFAULT_G),
+                   bulb_config_get_float(CFG_DEFAULT_B),
+                   bulb_config_get_float(CFG_DEFAULT_WW),
+                   bulb_config_get_float(CFG_DEFAULT_CW));
 }
 
 void pwm_output_init(void) {

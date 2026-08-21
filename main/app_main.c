@@ -17,7 +17,7 @@
 
 #include "config.h"
 #include "pwm_output.h"
-#include "id_store.h"
+#include "bulb_config.h"
 #include "sniffer.h"
 #include "controller.h"
 #include "dfu.h"
@@ -39,37 +39,44 @@ static void wifi_init_promiscuous(void) {
 }
 
 void app_main(void) {
-    // 1. LEDs first — GPIO/PWM configured and default color primed. No radio
-    //    yet, so this does not produce light on its own (see step 5b).
-    pwm_output_init();
-
-    // 2. Persistent storage (id + rollback state).
+    // 1. Persistent storage (config + id + rollback state) must come first: the
+    //    PWM setup below now reads its default color, curve, and gamma from the
+    //    config store.
     esp_err_t nvs_err = nvs_flash_init();
     if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
+    // 2. Load the config cache (NVS-or-default) before any consumer reads it.
+    bulb_config_init();
+
+    // 3. LEDs — GPIO/PWM configured and default color primed. No radio yet, so
+    //    this does not produce light on its own (see step 7); its only effect is
+    //    GPIO setup, so running it a few ms after NVS init is harmless.
+    pwm_output_init();
+
 #ifdef DFU_ROLLBACK_GUARD
-    // 3. If a freshly-flashed image keeps failing, revert before doing anything else.
+    // 4. If a freshly-flashed image keeps failing, revert before doing anything else.
     dfu_rollback_check_on_boot();
 #endif
 
-    // 4. Identity.
-    uint8_t my_id = id_store_load();
+    // 5. Identity.
+    uint8_t my_id = bulb_config_get_u8(CFG_BULB_ID);
 
-    // 5. Radio up in promiscuous mode.
+    // 6. Radio up in promiscuous mode.
     wifi_init_promiscuous();
 
-    // 5b. The WDEV timer the PWM driver rides on is only clocked now that the
-    //     radio is started — actually begin LED output at the default color.
+    // 7. The WDEV timer the PWM driver rides on is only clocked now that the
+    //    radio is started — actually begin LED output at the default color.
     pwm_output_start_after_radio();
 
     controller_start(my_id);
     sniffer_start(my_id);
 
-    ESP_LOGI(TAG, "bulb %d running (fallback %d ms, channel %d)",
-             my_id, FALLBACK_TIMEOUT_MS, WIFI_CHANNEL);
+    ESP_LOGI(TAG, "bulb %d running (fallback %u ms, channel %d)",
+             my_id, bulb_config_get_u32(CFG_FALLBACK_MS),
+             bulb_config_get_u8(CFG_WIFI_CHANNEL));
 
 #ifdef DFU_ROLLBACK_GUARD
     // 6. We reached a healthy running state; arm validation so this image is

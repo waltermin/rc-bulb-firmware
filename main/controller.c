@@ -8,6 +8,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "bulb_config.h"
 #include "pwm_output.h"
 #include "dfu.h"
 
@@ -30,7 +31,8 @@ static void controller_task(void *arg) {
     (void)arg;
     TickType_t last_seen = 0;
     bool at_default = true;  // pwm_output_init already applied the default
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(FALLBACK_TIMEOUT_MS);
+    const uint32_t fallback_ms = bulb_config_get_u32(CFG_FALLBACK_MS);
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(fallback_ms);
 
     for (;;) {
         ctrl_msg_t msg;
@@ -54,7 +56,7 @@ static void controller_task(void *arg) {
         if (!at_default) {
             TickType_t now = xTaskGetTickCount();
             if ((now - last_seen) >= timeout_ticks) {
-                ESP_LOGI(TAG, "no update in %d ms; reverting to default color", FALLBACK_TIMEOUT_MS);
+                ESP_LOGI(TAG, "no update in %u ms; reverting to default color", fallback_ms);
                 pwm_output_set_default();
                 at_default = true;
             }

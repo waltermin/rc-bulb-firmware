@@ -6,6 +6,8 @@ Following the OUI is a 1-byte packet tag, which describes the format of the data
 
 ## `0x01` - LightUpdate
 
+Legacy packet, no longer processed by new firmware. Older firmware may still need this for DFU.
+
 ```
 struct LightUpdatePacket {
     // if flags == 1, then control_data is the ID of a bulb we would like to enter DFU mode
@@ -43,14 +45,10 @@ struct PreciseLightUpdate {
 
 ## `0x03` - LightUpdateV2
 
-Similiar to LightUpdate, but 
+Similiar to LightUpdate, but without DFU (which has been split into a separate packet).
 
 ```
-struct LightUpdatePacket {
-    // if flags == 1, then control_data is the ID of a bulb we would like to enter DFU mode
-    control_flags: u8,
-    control_data: u8,
-
+struct LightUpdateV2 {
     entry_count: u8, // how many entries are in the following array, max of 11 (esp8266 firmware limit)
     entries: [BulbEntry; entry_count],
 }
@@ -62,5 +60,35 @@ struct BulbEntry {
     color_b: u8,
     color_ww: u8,
     color_cw: u8,
+}
+```
+
+## `0x04` - BulbCommand
+
+Used to remotely manage bulbs, change configurations, and initiate DFU mode.
+
+All bulbs will listen for these packets and track the highest `seq` seen since power-on. If a new highest `seq` is seen, the packet will be processed. If `seq` is equal to or lower than the highest seen, the packet will be ignored. `bulb_id_start` describes the start of the range of bulb IDs to which this command is addressed. `bulb_id_bounds` describes how many IDs the range extends by. If `bulb_id_bounds` is `0`, then the command is addressed only to the bulb specified by `bulb_id_start`. `cmd` is a tag that describes which type of command it is, and the bytes following it are the payload for the command.
+
+```
+struct BulbCommandPacket {
+    seq: u32,
+    bulb_id_start: u8
+    bulb_id_bounds: u8
+    cmd: u32,
+    data: ...
+}
+
+// cmd = 0x00
+// Instructs the device to enter DFU mode.
+struct EnterDfuModeCommand {
+    // no payload
+}
+
+// cmd = 0x01
+// Sets a config key to a given value.
+struct SetConfigCommand {
+    key: u16,
+    length: u8,
+    value: [u8; length],
 }
 ```

@@ -10,9 +10,10 @@
 extern "C" {
 #endif
 
-// Enable promiscuous mode (management frames only) on WIFI_CHANNEL and register
-// the RX callback. Requires WiFi to be initialized and started in STA mode
-// (but not connected). my_id selects which BulbEntry we react to.
+// Enable promiscuous mode (management frames only) on the configured Wi-Fi
+// channel (CFG_WIFI_CHANNEL) and register the RX callback. Requires WiFi to be
+// initialized and started in STA mode (but not connected), and the config store
+// loaded. my_id selects which BulbEntry we react to.
 void sniffer_start(uint8_t my_id);
 
 // Disable promiscuous mode (used when transitioning into DFU).

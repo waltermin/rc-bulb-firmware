@@ -1,7 +1,7 @@
 set(COMPONENT_SRCS
     "app_main.c"
     "pwm_output.c"
-    "id_store.c"
+    "bulb_config.c"
     "sniffer.c"
     "protocol.c"
     "controller.c"

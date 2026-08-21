@@ -8,6 +8,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "bulb_config.h"
 #include "protocol.h"
 #include "controller.h"
 
@@ -44,13 +45,14 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 
 void sniffer_start(uint8_t my_id) {
     s_my_id = my_id;
+    uint8_t channel = bulb_config_get_u8(CFG_WIFI_CHANNEL);
 
     wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT};
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_rx_cb));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-    ESP_ERROR_CHECK(esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    ESP_LOGI(TAG, "promiscuous on, channel %d, id %d", WIFI_CHANNEL, my_id);
+    ESP_ERROR_CHECK(esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE));
+    ESP_LOGI(TAG, "promiscuous on, channel %d, id %d", channel, my_id);
 }
 
 void sniffer_stop(void) {

@@ -34,6 +34,7 @@
 #include "mbedtls/sha256.h"
 
 #include "config.h"
+#include "bulb_config.h"
 #include "pwm_output.h"
 #include "sniffer.h"
 
@@ -92,8 +93,8 @@ static bool connect_to_ap(uint8_t my_id) {
     ESP_LOGI(TAG, "DFU hostname: %s", host);
 
     wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, DFU_AP_SSID, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, DFU_AP_PASS, sizeof(wc.sta.password) - 1);
+    strncpy((char *)wc.sta.ssid, bulb_config_get_str(CFG_DFU_SSID), sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, bulb_config_get_str(CFG_DFU_PASS), sizeof(wc.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wc));

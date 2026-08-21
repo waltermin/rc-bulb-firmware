@@ -3,6 +3,12 @@
 // Wire-format constants (OUI, protocol version, max entries) live in protocol.h
 // so the parser stays host-testable; everything else that a builder/operator
 // might want to change is here.
+//
+// Some of these values (bulb id, default color, fallback timeout, Wi-Fi channel,
+// duty curve, gamma, DFU AP/password) are now runtime-configurable via the
+// NVS-backed config store (bulb_config.*). For those, the #define here is the
+// DEFAULT used when the key is absent from flash — read them through the
+// bulb_config_get_*(CFG_*) getters at runtime, not by their macro name.
 
 #ifndef BULB_CONFIG_H
 #define BULB_CONFIG_H
