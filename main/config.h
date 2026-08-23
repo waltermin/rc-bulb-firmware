@@ -56,8 +56,8 @@
 // The active channel set is derived from OMIT_I2C_PINS in pwm_output.c (channel
 // indices are generated there, not hard-coded here).
 
-#define PWM_FREQ_HZ 250
-#define PWM_PERIOD_US (1000000 / PWM_FREQ_HZ)  // 4000 us at 250 Hz
+#define PWM_FREQ_HZ 1000
+#define PWM_PERIOD_US (1000000 / PWM_FREQ_HZ)  // 1000 us at 1000 Hz
 
 // Fraction of full scale the LEDs are allowed to reach (stock caps at 80%).
 #define PWM_MAX_POWER 0.80f

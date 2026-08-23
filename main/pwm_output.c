@@ -183,12 +183,7 @@ static bool frames_equal(const pwm_frame_t *a, const pwm_frame_t *b) {
 // calls copy the values into the driver's internal state, so the frame does not
 // need to outlive this call; pwm_start() commits the new period/duty/phase.
 //
-// Skip the commit entirely when the frame is unchanged. pwm_start() rebuilds the
-// edge table and re-publishes it to the IRAM timer ISR through a non-atomic,
-// unbarriered double-buffer handshake; if that publish races the ISR, the ISR
-// can latch a torn/stale buffer and drive a channel to the wrong level for up to
-// one period — a brief full-brightness flash. Re-applying an identical frame
-// (e.g. a constant color streamed at 100 Hz) buys nothing but that exposure.
+// Skip the commit entirely when the frame is unchanged.
 static void commit_frame(pwm_frame_t *f) {
     if (s_have_last && frames_equal(f, &s_last)) {
         return;
