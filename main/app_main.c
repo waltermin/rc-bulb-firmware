@@ -71,8 +71,8 @@ void app_main(void) {
     //    radio is started — actually begin LED output at the default color.
     pwm_output_start_after_radio();
 
-    controller_start(my_id);
-    sniffer_start(my_id);
+    controller_start();
+    sniffer_start();
 
     ESP_LOGI(TAG, "bulb %d running (fallback %u ms, channel %d)",
              my_id, bulb_config_get_u32(CFG_FALLBACK_MS),

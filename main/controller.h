@@ -10,9 +10,9 @@
 extern "C" {
 #endif
 
-// Create the controller queue + task. my_id is used only for logging here; the
-// sniffer does the id matching.
-void controller_start(uint8_t my_id);
+// Create the controller queue + task. The bulb id (used for DFU logging/handoff)
+// is read live from the config store when needed, so no id is passed in here.
+void controller_start(void);
 
 // Post a new color addressed to us, as normalized duty cycles in [0.0, 1.0]
 // (the protocol parser has already scaled/clamped both packet types into this
@@ -22,6 +22,11 @@ void controller_notify_entry(float r, float g, float b, float ww, float cw);
 
 // Post a DFU request (safe to call from the promiscuous RX callback context).
 void controller_notify_dfu(void);
+
+// Post a reboot request (from a Reboot BulbCommand). Applied on the controller
+// task, which calls esp_restart(). Safe to call from the promiscuous RX callback
+// context. Non-blocking; drops if the queue is full (a retransmit will retrigger).
+void controller_notify_reboot(void);
 
 // Post a config write (from a SetConfig BulbCommand): `key` is the 16-bit wire
 // tag, `value`/`len` the raw bytes. Applied on the controller task (which may

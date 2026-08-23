@@ -425,6 +425,37 @@ int main(void) {
         CHECK(!r.has_config);
     }
 
+    // --- BulbCommand Reboot (0x04/0x02) addressed to us (bounds 0) ---
+    {
+        size_t len = build_cmd_frame(buf, 107, MY_ID, 0, PROTO_CMD_REBOOT, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command Reboot for us:\n");
+        CHECK(r.valid);
+        CHECK(r.is_command);
+        CHECK(r.seq == 107);
+        CHECK(r.reboot_requested);
+        CHECK(!r.dfu_requested);
+        CHECK(!r.has_config);
+    }
+
+    // --- BulbCommand Reboot addressed by a range covering us ---
+    {
+        size_t len = build_cmd_frame(buf, 108, MY_ID - 1, 3, PROTO_CMD_REBOOT, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command Reboot range covers us:\n");
+        CHECK(r.valid && r.is_command);
+        CHECK(r.reboot_requested);
+    }
+
+    // --- BulbCommand Reboot not addressed to us: seq tracked, no effect ---
+    {
+        size_t len = build_cmd_frame(buf, 109, MY_ID + 1, 0, PROTO_CMD_REBOOT, NULL, 0);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("command Reboot not for us:\n");
+        CHECK(r.valid && r.is_command && r.seq == 109);
+        CHECK(!r.reboot_requested);
+    }
+
     // --- unknown command: valid + seq tracked, no effect ---
     {
         size_t len = build_cmd_frame(buf, 106, MY_ID, 0, 0x7F, NULL, 0);

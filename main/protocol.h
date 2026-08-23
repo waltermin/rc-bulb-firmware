@@ -59,6 +59,7 @@
 //     }
 //     cmd 0x00 EnterDfuMode: no payload.
 //     cmd 0x01 SetConfig:    u16 key; u8 length; u8 value[length].
+//     cmd 0x02 Reboot:       no payload.
 //   The seq gate ("highest seq since power-on") is stateful and handled by the
 //   caller (the sniffer), not this pure parser: parse exposes seq + is_command.
 //
@@ -125,6 +126,7 @@ extern "C" {
 #define PROTO_BULB_CMD_HDR_SIZE 8u
 #define PROTO_CMD_ENTER_DFU 0x00u        // cmd: enter DFU mode (no payload)
 #define PROTO_CMD_SET_CONFIG 0x01u       // cmd: set a config key (u16 key, u8 len, value[len])
+#define PROTO_CMD_REBOOT 0x02u           // cmd: reboot the device (no payload)
 #define PROTO_SETCONFIG_HDR_SIZE 3u      // key(2) + length(1), before the value bytes
 #define PROTO_CONFIG_VALUE_MAX 64u       // largest config value we accept (bounds RX buffers)
 
@@ -146,6 +148,7 @@ typedef struct {
     // addressed to my_id.
     bool     is_command;
     uint32_t seq;
+    bool     reboot_requested;   // Reboot command addressed to my_id
     bool     has_config;         // SetConfig addressed to my_id
     uint16_t config_key;         // 16-bit config key tag
     uint8_t  config_len;         // length of config_value, <= PROTO_CONFIG_VALUE_MAX

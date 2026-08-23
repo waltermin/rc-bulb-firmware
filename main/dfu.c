@@ -274,7 +274,8 @@ static void dfu_task(void *arg) {
     ESP_LOGW(TAG, "entering DFU mode");
 
     sniffer_stop();
-    pwm_output_set_default();  // steady, known LED state during the update
+    // Steady, known LED state during the update: 50% blue signals "in DFU mode".
+    pwm_output_set(0.0f, 0.0f, 0.5f, 0.0f, 0.0f);
 
     if (!connect_to_ap(my_id)) {
         ESP_LOGE(TAG, "failed to join AP; rebooting");

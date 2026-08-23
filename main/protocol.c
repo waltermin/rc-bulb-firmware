@@ -11,6 +11,7 @@ static const bulb_parse_result_t INVALID = {
     .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
     .is_command = false,
     .seq = 0,
+    .reboot_requested = false,
     .has_config = false,
     .config_key = 0,
     .config_len = 0,
@@ -158,6 +159,9 @@ static bulb_parse_result_t parse_bulb_command(const uint8_t *pkt, size_t pkt_len
     switch (cmd) {
         case PROTO_CMD_ENTER_DFU:
             out.dfu_requested = true;
+            break;
+        case PROTO_CMD_REBOOT:
+            out.reboot_requested = true;
             break;
         case PROTO_CMD_SET_CONFIG: {
             const size_t base = PROTO_BULB_CMD_HDR_SIZE;  // key/length start here

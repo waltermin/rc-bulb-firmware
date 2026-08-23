@@ -91,4 +91,10 @@ struct SetConfigCommand {
     length: u8,
     value: [u8; length],
 }
+
+// cmd = 0x02
+// Instructs the device to reboot.
+struct RebootCommand {
+    // not payload
+}
 ```

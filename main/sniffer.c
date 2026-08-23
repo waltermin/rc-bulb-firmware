@@ -14,8 +14,6 @@
 
 static const char *TAG = "sniffer";
 
-static uint8_t s_my_id;
-
 // Highest BulbCommand seq processed since power-on (anti-replay). The RX callback
 // is single-threaded (WiFi task), so plain statics need no locking.
 static uint32_t s_highest_seq;
@@ -35,7 +33,12 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     const wifi_promiscuous_pkt_t *ppkt = (const wifi_promiscuous_pkt_t *)buf;
     const uint32_t len = frame_length(&ppkt->rx_ctrl);
 
-    bulb_parse_result_t r = protocol_parse_beacon(ppkt->payload, len, s_my_id);
+    // Read our id live from the config cache (a single atomic byte load) so a
+    // SetConfig that rewrites CFG_BULB_ID takes effect on the very next frame
+    // rather than only after a reboot.
+    const uint8_t my_id = bulb_config_get_u8(CFG_BULB_ID);
+
+    bulb_parse_result_t r = protocol_parse_beacon(ppkt->payload, len, my_id);
     if (!r.valid) {
         return;
     }
@@ -51,6 +54,8 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 
         if (r.dfu_requested) {
             controller_notify_dfu();
+        } else if (r.reboot_requested) {
+            controller_notify_reboot();
         } else if (r.has_config) {
             controller_notify_set_config(r.config_key, r.config_value, r.config_len);
         }
@@ -67,8 +72,7 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
-void sniffer_start(uint8_t my_id) {
-    s_my_id = my_id;
+void sniffer_start(void) {
     uint8_t channel = bulb_config_get_u8(CFG_WIFI_CHANNEL);
 
     wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT};
@@ -76,7 +80,13 @@ void sniffer_start(uint8_t my_id) {
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_rx_cb));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE));
-    ESP_LOGI(TAG, "promiscuous on, channel %d, id %d", channel, my_id);
+    ESP_LOGI(TAG, "promiscuous on, channel %d, id %d", channel,
+             bulb_config_get_u8(CFG_BULB_ID));
+}
+
+void sniffer_apply_channel(uint8_t channel) {
+    esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    ESP_LOGI(TAG, "re-tuned to channel %d -> %d", channel, err);
 }
 
 void sniffer_stop(void) {
