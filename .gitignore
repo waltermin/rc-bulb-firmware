@@ -23,3 +23,5 @@ __pycache__/
 
 # serial capture logs
 *.log
+
+dfu_fleet_state.json

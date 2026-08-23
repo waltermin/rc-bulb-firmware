@@ -31,6 +31,15 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
     const wifi_promiscuous_pkt_t *ppkt = (const wifi_promiscuous_pkt_t *)buf;
+
+    // The promiscuous path delivers frames even when the hardware FCS check
+    // failed; rxend_state is nonzero for those. Our vendor IE carries no
+    // checksum of its own, so a frame with a bit error would otherwise be
+    // parsed as-is and can flash the bulb to a wrong color for one update.
+    if (ppkt->rx_ctrl.rxend_state != 0) {
+        return;
+    }
+
     const uint32_t len = frame_length(&ppkt->rx_ctrl);
 
     // Read our id live from the config cache (a single atomic byte load) so a
