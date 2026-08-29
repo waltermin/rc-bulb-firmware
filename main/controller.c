@@ -84,7 +84,7 @@ static void controller_task(void *arg) {
                 // Config writes touch flash, so they happen here rather than in
                 // the RX callback. Does not affect the fallback timer.
                 esp_err_t err = bulb_config_set_raw(msg.u.cfg.key, msg.u.cfg.value, msg.u.cfg.len);
-                ESP_LOGI(TAG, "set config key 0x%04x (%u bytes) -> %d",
+                ESP_LOGI(TAG, "set config key 0x%04x (%u bytes) (err=%d)",
                          msg.u.cfg.key, msg.u.cfg.len, err);
                 // If a default-color channel changed and we're currently resting
                 // at the default, repaint now so the new default takes effect

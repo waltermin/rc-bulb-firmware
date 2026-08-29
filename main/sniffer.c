@@ -95,7 +95,7 @@ void sniffer_start(void) {
 
 void sniffer_apply_channel(uint8_t channel) {
     esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-    ESP_LOGI(TAG, "re-tuned to channel %d -> %d", channel, err);
+    ESP_LOGI(TAG, "re-tuned to channel %d (err=%d)", channel, err);
 }
 
 void sniffer_stop(void) {
