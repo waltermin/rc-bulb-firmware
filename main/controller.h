@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 
+#include "dfu2.h"  // dfu2_params_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -20,8 +22,12 @@ void controller_start(void);
 // drops if the queue is momentarily full.
 void controller_notify_entry(float r, float g, float b, float ww, float cw);
 
-// Post a DFU request (safe to call from the promiscuous RX callback context).
-void controller_notify_dfu(void);
+// Post a DFU2 (pull-based OTA) request with the parameters copied out of a
+// Dfu2Request beacon. Applied on the controller task, which hands off to the DFU2
+// task and stands down. Safe to call from the promiscuous RX callback context;
+// `params` is copied. Non-blocking; drops if the queue is full (a re-broadcast
+// will retrigger).
+void controller_notify_dfu2(const dfu2_params_t *params);
 
 // Post a reboot request (from a Reboot BulbCommand). Applied on the controller
 // task, which calls esp_restart(). Safe to call from the promiscuous RX callback

@@ -132,6 +132,30 @@ static size_t build_cmd_frame(uint8_t *out, uint32_t seq, uint8_t start, uint8_t
     return wrap_beacon(out, pkt, m);
 }
 
+// Build a beacon carrying a Dfu2Request (0x05). `build_id`/`ssid`/`pass` are
+// raw byte fields; pass build_id_len etc. so truncation/overrun can be tested.
+static size_t build_dfu2_frame(uint8_t *out, uint8_t fmt, uint8_t start, uint8_t bounds,
+                               const uint8_t ip[4], uint16_t port,
+                               const uint8_t *build_id, uint8_t build_id_len,
+                               const uint8_t *ssid, uint8_t ssid_len,
+                               const uint8_t *pass, uint8_t pass_len) {
+    uint8_t pkt[128];
+    size_t m = 0;
+    pkt[m++] = PROTO_TAG_DFU2_REQUEST;
+    pkt[m++] = fmt;
+    pkt[m++] = start;
+    pkt[m++] = bounds;
+    pkt[m++] = ip[0]; pkt[m++] = ip[1]; pkt[m++] = ip[2]; pkt[m++] = ip[3];
+    pkt[m++] = (uint8_t)port; pkt[m++] = (uint8_t)(port >> 8);
+    pkt[m++] = build_id_len;
+    for (uint8_t i = 0; i < build_id_len; i++) pkt[m++] = build_id[i];
+    pkt[m++] = ssid_len;
+    for (uint8_t i = 0; i < ssid_len; i++) pkt[m++] = ssid[i];
+    pkt[m++] = pass_len;
+    for (uint8_t i = 0; i < pass_len; i++) pkt[m++] = pass[i];
+    return wrap_beacon(out, pkt, m);
+}
+
 int main(void) {
     uint8_t buf[512];
 
@@ -472,6 +496,112 @@ int main(void) {
         bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
         printf("command truncated header:\n");
         CHECK(!r.valid);
+    }
+
+    // ---- Dfu2Request (0x05) ------------------------------------------------
+    {
+        const uint8_t ip[4] = {192, 168, 4, 1};
+        const uint8_t bid[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04};
+        const uint8_t ssid[] = "RC-Update";
+        const uint8_t pass[] = "swordfish";
+
+        // --- Dfu2Request addressed to us (bounds 0): all fields decoded ---
+        {
+            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, (uint8_t)strlen((const char *)pass));
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 for us:\n");
+            CHECK(r.valid);
+            CHECK(r.dfu2_requested);
+            CHECK(r.dfu2.server_ip[0] == 192 && r.dfu2.server_ip[3] == 1);
+            CHECK(r.dfu2.server_port == 3333);
+            CHECK(r.dfu2.build_id_len == 8);
+            CHECK(r.dfu2.build_id[0] == 0xDE && r.dfu2.build_id[7] == 0x04);
+            CHECK(r.dfu2.ssid_len == strlen((const char *)ssid));
+            CHECK(memcmp(r.dfu2.ssid, ssid, r.dfu2.ssid_len) == 0);
+            CHECK(r.dfu2.pass_len == strlen((const char *)pass));
+            CHECK(memcmp(r.dfu2.pass, pass, r.dfu2.pass_len) == 0);
+        }
+
+        // --- Dfu2Request addressed by a range covering us ---
+        {
+            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID - 2, 5, ip, 3333,
+                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, (uint8_t)strlen((const char *)pass));
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 range covers us:\n");
+            CHECK(r.valid && r.dfu2_requested);
+        }
+
+        // --- Dfu2Request not addressed to us: valid frame, no request ---
+        {
+            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID + 1, 0, ip, 3333,
+                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, (uint8_t)strlen((const char *)pass));
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 not for us:\n");
+            CHECK(r.valid);
+            CHECK(!r.dfu2_requested);
+        }
+
+        // --- open network (empty password) is accepted ---
+        {
+            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, 0);
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 open network:\n");
+            CHECK(r.valid && r.dfu2_requested);
+            CHECK(r.dfu2.pass_len == 0);
+        }
+
+        // --- wrong format version is rejected ---
+        {
+            size_t len = build_dfu2_frame(buf, 0x02, MY_ID, 0, ip, 3333,
+                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, (uint8_t)strlen((const char *)pass));
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 bad fmt:\n");
+            CHECK(!r.valid);
+        }
+
+        // --- build_id length over our max is rejected ---
+        {
+            const uint8_t bid9[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+                                          bid9, 9, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, (uint8_t)strlen((const char *)pass));
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 build_id too long:\n");
+            CHECK(!r.valid);
+        }
+
+        // --- ssid length prefix overruns the packet: rejected ---
+        {
+            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                          pass, (uint8_t)strlen((const char *)pass));
+            // Bump the ssid_len byte so it claims more bytes than remain. Layout in
+            // the IE payload: fixed(10) + build_id_len(1) + build_id(8) = offset 19
+            // is the ssid_len byte, at frame offset ie_start(36)+2(tag,len)+3(oui)+19.
+            buf[36 + 2 + 3 + 19] = PROTO_DFU2_SSID_MAX;  // claims 32, far more than present
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 ssid overrun:\n");
+            CHECK(!r.valid);
+        }
+
+        // --- truncated before the build_id length byte: rejected ---
+        {
+            uint8_t pkt[PROTO_DFU2_FIXED_SIZE] = {
+                PROTO_TAG_DFU2_REQUEST, PROTO_DFU2_FMT_VERSION, MY_ID, 0,
+                192, 168, 4, 1, 0x05, 0x0D,  // ip + port(3333)
+            };
+            size_t len = wrap_beacon(buf, pkt, sizeof(pkt));  // no build_id/ssid/pass
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("dfu2 truncated fields:\n");
+            CHECK(!r.valid);
+        }
     }
 
     printf("\n%d checks, %d failures\n", g_checks, g_fails);

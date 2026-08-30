@@ -9,9 +9,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <stdio.h>
+
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "tcpip_adapter.h"
 
@@ -20,7 +23,7 @@
 #include "bulb_config.h"
 #include "sniffer.h"
 #include "controller.h"
-#include "dfu.h"
+#include "dfu2.h"
 
 static const char *TAG = "app";
 
@@ -58,7 +61,7 @@ void app_main(void) {
 
 #ifdef DFU_ROLLBACK_GUARD
     // 4. If a freshly-flashed image keeps failing, revert before doing anything else.
-    dfu_rollback_check_on_boot();
+    dfu2_rollback_check_on_boot();
 #endif
 
     // 5. Identity.
@@ -78,9 +81,20 @@ void app_main(void) {
              my_id, bulb_config_get_u32(CFG_FALLBACK_MS),
              bulb_config_get_u8(CFG_WIFI_CHANNEL));
 
+    // Report this image's build identity: the version string (from version.txt)
+    // and the 8-byte DFU2 build id (sha256(version)[:8]) that the base station /
+    // update server advertise, so a rollout is self-evident from the console.
+    uint8_t bid[PROTO_DFU2_BUILD_ID_LEN];
+    dfu2_own_build_id(bid);
+    char bidhex[PROTO_DFU2_BUILD_ID_LEN * 2 + 1];
+    for (int i = 0; i < PROTO_DFU2_BUILD_ID_LEN; i++) {
+        snprintf(bidhex + i * 2, 3, "%02x", bid[i]);
+    }
+    ESP_LOGI(TAG, "build %s (id %s)", esp_ota_get_app_description()->version, bidhex);
+
 #ifdef DFU_ROLLBACK_GUARD
     // 6. We reached a healthy running state; arm validation so this image is
     //    marked good after DFU_BOOT_VALIDATE_MS.
-    dfu_rollback_arm_validation();
+    dfu2_rollback_arm_validation();
 #endif
 }

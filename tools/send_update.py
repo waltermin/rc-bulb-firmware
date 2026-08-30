@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Broadcast light-control beacons for testing the bulb firmware.
 
-Two packet types are supported (selected by the packet tag, the first payload
-byte after the OUI):
+Packet types are selected by the packet tag (the first payload byte after the OUI):
     0x01 LightUpdate        --entry id:r,g,b,ww,cw   (u8 channels, 0..255)
     0x02 PreciseLightUpdate --precise id:r,g,b,ww,cw (f32 channels, 0.0..1.0)
+    0x05 Dfu2Request        --dfu2 RANGE SSID PASS IP PORT BUILD_ID_HEX
+                            (pull-based OTA advert; RANGE is 'a-b' or a single id)
 
 Requires a Wi-Fi interface in MONITOR mode on the same channel the bulb sniffs
 (WIFI_CHANNEL in config.h, default 1) and root privileges. Uses scapy.
@@ -25,8 +26,12 @@ Examples:
     # Drive bulb id 7 to full-red with a PreciseLightUpdate (float channels):
     sudo python3 send_update.py -i wlan0mon --precise 7:1.0,0,0,0,0
 
-    # Request that bulb id 7 enter DFU mode:
+    # Request that bulb id 7 enter DFU mode (legacy push DFU):
     sudo python3 send_update.py -i wlan0mon --dfu 7 --count 5
+
+    # Advertise a pull-based DFU2 update for bulbs 1..25 (build id from dfu2_server.py):
+    sudo python3 send_update.py -i wlan0mon \
+        --dfu2 1-25 RC-Update swordfish 192.168.4.2 3333 deadbeef01020304
 """
 import argparse
 import struct
@@ -41,7 +46,11 @@ except ImportError:
 VENDOR_OUI = bytes([0x52, 0x43, 0x68])
 TAG_LIGHT_UPDATE = 0x01
 TAG_PRECISE_LIGHT_UPDATE = 0x02
+TAG_DFU2_REQUEST = 0x05
 CTRL_FLAG_DFU = 0x01
+DFU2_FMT_VERSION = 0x01
+DFU2_BUILD_ID_LEN = 8
+DFU2_MAX_BODY = 70   # ESP8266 promiscuous <128B frame limit (PROTO_DFU2_MAX_BODY)
 MAX_ENTRIES = 11
 BSSID = "52:43:68:00:00:01"  # arbitrary; base-station address
 
@@ -89,6 +98,47 @@ def build_light_update(entries, control_flags, control_data):
     return build_frame_from_body(body)
 
 
+def build_dfu2(spec):
+    """spec = [RANGE, SSID, PASS, IP, PORT, BUILD_ID_HEX] -> Dfu2Request (0x05).
+
+    RANGE is 'start-last' or a single id; BUILD_ID_HEX is DFU2_BUILD_ID_LEN bytes
+    of hex. Rejects (raises) if the body would exceed the ESP8266-deliverable size.
+    """
+    rng, ssid, passwd, ip, port, build_hex = spec
+    if "-" in rng:
+        a, b = rng.split("-", 1)
+        start, last = int(a), int(b)
+    else:
+        start = last = int(rng)
+    if not (0 <= start <= last <= 255):
+        raise ValueError(f"bad id range '{rng}' (0..255, start<=last)")
+    bounds = last - start
+
+    build = bytes.fromhex(build_hex)
+    if len(build) != DFU2_BUILD_ID_LEN:
+        raise ValueError(f"build id must be {DFU2_BUILD_ID_LEN} bytes "
+                         f"({DFU2_BUILD_ID_LEN * 2} hex chars)")
+    octets = ip.split(".")
+    if len(octets) != 4 or any(not 0 <= int(o) <= 255 for o in octets):
+        raise ValueError(f"bad ip '{ip}'")
+    ipb = bytes(int(o) for o in octets)
+    portn = int(port)
+    if not 1 <= portn <= 65535:
+        raise ValueError(f"bad port '{port}'")
+
+    s = ssid.encode()
+    p = passwd.encode()
+    body = (bytes([TAG_DFU2_REQUEST, DFU2_FMT_VERSION, start, bounds]) + ipb
+            + struct.pack("<H", portn)
+            + bytes([len(build)]) + build
+            + bytes([len(s)]) + s
+            + bytes([len(p)]) + p)
+    if len(body) > DFU2_MAX_BODY:
+        raise ValueError(f"request too large ({len(body)}B body > {DFU2_MAX_BODY}B "
+                         f"budget); shorten the SSID/password")
+    return build_frame_from_body(body)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -99,16 +149,26 @@ def main():
                     help="PreciseLightUpdate (0x02) 'id:r,g,b,ww,cw', floats 0.0..1.0")
     ap.add_argument("--dfu", type=int, default=None,
                     help="request DFU mode for this bulb id (LightUpdate control field)")
+    ap.add_argument("--dfu2", nargs=6, default=None,
+                    metavar=("RANGE", "SSID", "PASS", "IP", "PORT", "BUILD_ID_HEX"),
+                    help="Dfu2Request (0x05) pull-based OTA advert; RANGE is 'a-b' or 'n'")
     ap.add_argument("--interval", type=float, default=0.5, help="seconds between frames")
     ap.add_argument("--count", type=int, default=0, help="frames to send (0 = forever)")
     args = ap.parse_args()
 
-    # A PreciseLightUpdate is a distinct packet type and carries no entry table
-    # or control/DFU fields, so it is mutually exclusive with --entry/--dfu.
+    # Each of these is a distinct packet type; keep them mutually exclusive.
     if args.precise is not None and (args.entry or args.dfu is not None):
         ap.error("--precise cannot be combined with --entry or --dfu")
+    if args.dfu2 is not None and (args.entry or args.dfu is not None or args.precise is not None):
+        ap.error("--dfu2 cannot be combined with --entry/--dfu/--precise")
 
-    if args.precise is not None:
+    if args.dfu2 is not None:
+        try:
+            frame = build_dfu2(args.dfu2)
+        except ValueError as e:
+            ap.error(str(e))
+        desc = f"dfu2 range={args.dfu2[0]} build={args.dfu2[5]}"
+    elif args.precise is not None:
         frame = build_frame_from_body(parse_precise(args.precise))
         desc = f"precise={args.precise}"
     else:

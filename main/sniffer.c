@@ -3,6 +3,8 @@
 
 #include "sniffer.h"
 
+#include <string.h>
+
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "esp_log.h"
@@ -11,6 +13,7 @@
 #include "bulb_config.h"
 #include "protocol.h"
 #include "controller.h"
+#include "dfu2.h"
 
 static const char *TAG = "sniffer";
 
@@ -18,6 +21,41 @@ static const char *TAG = "sniffer";
 // is single-threaded (WiFi task), so plain statics need no locking.
 static uint32_t s_highest_seq;
 static bool s_seq_seen;
+
+// Set once we have handed a Dfu2Request to the controller, so repeated broadcasts
+// (which have no seq) do not queue the request again while DFU2 is spinning up.
+static bool s_dfu2_notified;
+
+// Handle a Dfu2Request addressed to us: if the advertised build id differs from
+// our own running build id, copy the request out of the (aliased) RX buffer and
+// hand it to the controller. If it matches, we are already on the target build.
+static void handle_dfu2(const bulb_parse_result_t *r) {
+    if (s_dfu2_notified) {
+        return;
+    }
+    uint8_t mine[PROTO_DFU2_BUILD_ID_LEN];
+    dfu2_own_build_id(mine);
+    if (memcmp(mine, r->dfu2.build_id, r->dfu2.build_id_len) == 0) {
+        return;  // already running the advertised build
+    }
+
+    dfu2_params_t p = {0};
+    uint8_t sl = r->dfu2.ssid_len;
+    if (sl > PROTO_DFU2_SSID_MAX) sl = PROTO_DFU2_SSID_MAX;
+    memcpy(p.ssid, r->dfu2.ssid, sl);
+    p.ssid[sl] = '\0';
+    uint8_t pl = r->dfu2.pass_len;
+    if (pl > PROTO_DFU2_PASS_MAX) pl = PROTO_DFU2_PASS_MAX;
+    memcpy(p.pass, r->dfu2.pass, pl);
+    p.pass[pl] = '\0';
+    p.build_id_len = r->dfu2.build_id_len;
+    memcpy(p.build_id, r->dfu2.build_id, r->dfu2.build_id_len);
+    memcpy(p.server_ip, r->dfu2.server_ip, 4);
+    p.server_port = r->dfu2.server_port;
+
+    s_dfu2_notified = true;
+    controller_notify_dfu2(&p);
+}
 
 // Extract the 802.11 frame length from the RX control metadata. Beacons are
 // sent at legacy rates, so legacy_length is the payload length; fall back to
@@ -52,6 +90,13 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
 
+    // Dfu2Request (0x05): pull-based OTA. No seq gate — every broadcast is
+    // re-evaluated; the build-id comparison + s_dfu2_notified provide idempotency.
+    if (r.dfu2_requested) {
+        handle_dfu2(&r);
+        return;
+    }
+
     if (r.is_command) {
         // Anti-replay: act only on the first sighting of a new-highest seq.
         // Retransmissions of the same command carry the same seq and are ignored.
@@ -61,9 +106,10 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         s_highest_seq = r.seq;
         s_seq_seen = true;
 
-        if (r.dfu_requested) {
-            controller_notify_dfu();
-        } else if (r.reboot_requested) {
+        // Note: 0x04 EnterDfuMode (r.dfu_requested) is intentionally NOT acted on
+        // by this firmware — DFU is now pull-based via 0x05 Dfu2Request. The seq
+        // is still consumed above so a later real command isn't reprocessed.
+        if (r.reboot_requested) {
             controller_notify_reboot();
         } else if (r.has_config) {
             controller_notify_set_config(r.config_key, r.config_value, r.config_len);
@@ -71,11 +117,8 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;  // command handled (or not addressed to us)
     }
 
-    // Color-bearing packets (legacy 0x01 DFU field, 0x02, 0x03).
-    if (r.dfu_requested) {
-        controller_notify_dfu();
-        return;  // ignore any color in the same frame; DFU takes over
-    }
+    // Color-bearing packets (0x02, 0x03; legacy 0x01 if enabled). Any legacy
+    // dfu_requested field is ignored (see above).
     if (r.has_entry) {
         controller_notify_entry(r.r, r.g, r.b, r.ww, r.cw);
     }

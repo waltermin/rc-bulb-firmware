@@ -30,6 +30,19 @@ Write-Host "IDF_PATH = $($env:IDF_PATH)"
 
 $env:PATH = (Join-Path $here '.stubbin') + [IO.Path]::PathSeparator + $env:PATH
 
+# Stamp a unique build id into esp_app_desc.version via version.txt (the SDK reads
+# it before git describe). This is the DFU2 build identity: the bulb and the update
+# server both derive the 8-byte build id as sha256(version)[:8] (the toolchain does
+# not populate app_elf_sha256). A fresh random token per build guarantees every
+# image is distinguishable. Set BULB_BUILD_ID to pin it.
+if ($env:BULB_BUILD_ID) {
+    $buildId = $env:BULB_BUILD_ID
+} else {
+    $buildId = 'rc-' + -join ((1..6) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+}
+Set-Content -LiteralPath (Join-Path $here 'version.txt') -Value $buildId -Encoding ascii -NoNewline
+Write-Host "build id (version.txt): $buildId"
+
 $build_dir = Join-Path $here 'build'
 New-Item -ItemType Directory -Force -Path $build_dir | Out-Null
 

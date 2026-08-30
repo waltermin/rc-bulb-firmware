@@ -16,6 +16,8 @@ static const bulb_parse_result_t INVALID = {
     .config_key = 0,
     .config_len = 0,
     .config_value = NULL,
+    .dfu2_requested = false,
+    // .dfu2 sub-struct is zero-initialized (pointers NULL, lengths 0).
 };
 
 // 802.11 Frame Control (first octet): [subtype:4][type:2][version:2].
@@ -217,6 +219,70 @@ static bulb_parse_result_t parse_precise_light_update(const uint8_t *pkt, size_t
     return out;
 }
 
+// 0x05 Dfu2Request: [tag, fmt, start, bounds, ip(4), port(u16), build_id(len+n),
+// ssid(len+n), pass(len+n)]. Sets dfu2_requested only when my_id is in
+// [start, start+bounds]; every field is length-checked against pkt_len before it
+// is read, and the string/build-id pointers alias `pkt` (copy before reuse).
+static bulb_parse_result_t parse_dfu2_request(const uint8_t *pkt, size_t pkt_len,
+                                              uint8_t my_id) {
+    if (pkt_len < PROTO_DFU2_FIXED_SIZE) {
+        return INVALID;
+    }
+    if (pkt[1] != PROTO_DFU2_FMT_VERSION) {
+        return INVALID;  // unknown format version
+    }
+    const uint8_t start = pkt[2];
+    const uint8_t bounds = pkt[3];
+
+    bulb_parse_result_t out = INVALID;
+    out.valid = true;
+
+    // Addressing: inclusive range [start, start + bounds], 32-bit to avoid u8
+    // wraparound. Not for us -> valid frame, no request (nothing else to decode).
+    if (my_id < start || (uint32_t)my_id > (uint32_t)start + (uint32_t)bounds) {
+        return out;
+    }
+
+    out.dfu2.server_ip[0] = pkt[4];
+    out.dfu2.server_ip[1] = pkt[5];
+    out.dfu2.server_ip[2] = pkt[6];
+    out.dfu2.server_ip[3] = pkt[7];
+    out.dfu2.server_port = read_u16_le(pkt + 8);
+
+    // Three length-prefixed variable fields follow the fixed header.
+    size_t off = PROTO_DFU2_FIXED_SIZE;  // == 10
+
+    // build_id
+    if (off + 1 > pkt_len) return INVALID;
+    const uint8_t bl = pkt[off++];
+    if (bl == 0 || bl > PROTO_DFU2_BUILD_ID_LEN) return INVALID;
+    if (off + bl > pkt_len) return INVALID;
+    out.dfu2.build_id = pkt + off;
+    out.dfu2.build_id_len = bl;
+    off += bl;
+
+    // ssid
+    if (off + 1 > pkt_len) return INVALID;
+    const uint8_t sl = pkt[off++];
+    if (sl == 0 || sl > PROTO_DFU2_SSID_MAX) return INVALID;
+    if (off + sl > pkt_len) return INVALID;
+    out.dfu2.ssid = pkt + off;
+    out.dfu2.ssid_len = sl;
+    off += sl;
+
+    // pass (may be empty for an open network)
+    if (off + 1 > pkt_len) return INVALID;
+    const uint8_t pl = pkt[off++];
+    if (pl > PROTO_DFU2_PASS_MAX) return INVALID;
+    if (off + pl > pkt_len) return INVALID;
+    out.dfu2.pass = pkt + off;
+    out.dfu2.pass_len = pl;
+    off += pl;
+
+    out.dfu2_requested = true;
+    return out;
+}
+
 bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len, uint8_t my_id) {
     if (frame == NULL) {
         return INVALID;
@@ -278,6 +344,8 @@ bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len
             return parse_light_update_v2(pkt, pkt_len, my_id);
         case PROTO_TAG_BULB_COMMAND:
             return parse_bulb_command(pkt, pkt_len, my_id);
+        case PROTO_TAG_DFU2_REQUEST:
+            return parse_dfu2_request(pkt, pkt_len, my_id);
         default:
             return INVALID;  // unknown or disabled packet tag
     }

@@ -63,6 +63,29 @@
 //   The seq gate ("highest seq since power-on") is stateful and handled by the
 //   caller (the sniffer), not this pure parser: parse exposes seq + is_command.
 //
+//   0x05 Dfu2Request — pull-based OTA: advertise an update for an id range. A bulb
+//        in range whose own build id differs from the advertised one connects OUT
+//        to the given server and pulls the image (see dfu2.*).
+//     struct Dfu2RequestPacket {
+//       u8  packet_tag;     // 0x05
+//       u8  fmt_version;    // 0x01
+//       u8  id_start;       // addressed to ids [start, start + bounds] inclusive
+//       u8  id_bounds;      // 0 => only id_start
+//       u8  server_ip[4];   // IPv4, dotted-order octets (a.b.c.d)
+//       u16 server_port;    // little-endian
+//       u8  build_id_len;   // length of the target build id (<= 8)
+//       u8  build_id[build_id_len];  // target ELF-SHA256 prefix
+//       u8  ssid_len;       // 1..32
+//       u8  ssid[ssid_len];
+//       u8  pass_len;       // 0..63 (0 = open network)
+//       u8  pass[pass_len];
+//     }
+//   There is deliberately NO anti-replay seq on 0x05: a bulb re-evaluates every
+//   broadcast (so a missed/just-rebooted bulb still acts) and idempotency comes
+//   from the build-id comparison + an in-progress guard in the caller. The whole
+//   vendor-IE body must stay <= PROTO_DFU2_MAX_BODY bytes (ESP8266 promiscuous RX
+//   drops frames >= 128 bytes total).
+//
 // Color-bearing packets (0x01/0x02/0x03) resolve to "no update for me" or a
 // normalized [0,1] color; commands (0x04) resolve to a DFU or config request.
 // protocol_parse_beacon() hides the wire encoding behind bulb_parse_result_t.
@@ -98,6 +121,7 @@ extern "C" {
 #define PROTO_TAG_PRECISE_LIGHT_UPDATE 0x02u  // single bulb, f32-per-channel
 #define PROTO_TAG_LIGHT_UPDATE_V2 0x03u       // u8-per-channel table, no DFU
 #define PROTO_TAG_BULB_COMMAND 0x04u          // remote management (config / DFU)
+#define PROTO_TAG_DFU2_REQUEST 0x05u          // pull-based OTA advertisement
 #define PROTO_TAG_SIZE 1u                     // width of the packet tag itself
 
 // Whether the deprecated 0x01 LightUpdate is still processed. New firmware
@@ -130,6 +154,19 @@ extern "C" {
 #define PROTO_SETCONFIG_HDR_SIZE 3u      // key(2) + length(1), before the value bytes
 #define PROTO_CONFIG_VALUE_MAX 64u       // largest config value we accept (bounds RX buffers)
 
+// Dfu2Request (0x05). Fixed header before the variable length-prefixed fields:
+// tag + fmt + start + bounds + server_ip(4) + server_port(2) = 10 bytes.
+#define PROTO_DFU2_FIXED_SIZE 10u
+#define PROTO_DFU2_FMT_VERSION 0x01u
+#define PROTO_DFU2_BUILD_ID_LEN 8u       // advertised/compared ELF-SHA256 prefix length
+#define PROTO_DFU2_SSID_MAX 32u          // max SSID bytes
+#define PROTO_DFU2_PASS_MAX 63u          // max WPA2 passphrase bytes
+// Max usable vendor-IE body (packet tag + all fields). The ESP8266 Wi-Fi stack
+// only delivers promiscuous frames under 128 bytes total; with 45 bytes of
+// 802.11 + beacon + IE + OUI + FCS overhead that leaves 70 bytes of body. The
+// base station rejects (does not broadcast) a Dfu2Request that would exceed this.
+#define PROTO_DFU2_MAX_BODY 70u
+
 // ---- parse result -----------------------------------------------------------
 
 typedef struct {
@@ -153,6 +190,19 @@ typedef struct {
     uint16_t config_key;         // 16-bit config key tag
     uint8_t  config_len;         // length of config_value, <= PROTO_CONFIG_VALUE_MAX
     const uint8_t *config_value; // -> value bytes within `frame`; copy before reuse
+
+    // Dfu2Request (0x05) fields. dfu2_requested is set only when the request is
+    // addressed to my_id; the pointers alias `frame`, so copy them before the RX
+    // buffer is reused (same rule as config_value). The caller still decides
+    // whether to act by comparing build_id to its own running build id.
+    bool     dfu2_requested;
+    struct {
+        const uint8_t *build_id;  uint8_t build_id_len;  // target ELF-SHA256 prefix
+        const uint8_t *ssid;      uint8_t ssid_len;
+        const uint8_t *pass;      uint8_t pass_len;
+        uint8_t  server_ip[4];    // dotted-order octets (a.b.c.d)
+        uint16_t server_port;
+    } dfu2;
 } bulb_parse_result_t;
 
 // Parse a raw 802.11 frame (as delivered by the promiscuous RX path).

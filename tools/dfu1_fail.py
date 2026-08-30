@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""DFU failure-injection tester.
+"""LEGACY (DFU v1, push-based) failure-injection tester — exercises the old
+push-server firmware's abort/rollback paths. For the pull-based DFU2, inject
+failures with the server side instead (kill dfu2_server.py mid-transfer, serve a
+corrupt image, or advertise a wrong AP password via the base-station `dfu2`).
 
-Triggers DFU on bulb id 1 via the base station (COM9), reads the bulb's IP from
-the running tail logfile, then pushes a firmware image in a deliberately broken
-way to exercise the bulb's abort/rollback paths.
+Triggers push-DFU on bulb id 1 via the base station (COM9), reads the bulb's IP
+from the running tail logfile, then pushes a firmware image in a deliberately
+broken way to exercise the bulb's abort/rollback paths.
 
-    python3 tools/dfu_fail.py <half|corrupt|slow> [image.bin]
+    python3 tools/dfu1_fail.py <half|corrupt|slow> [image.bin]
 
 Requires the no-reset tail (tools/tail.py) to be running and writing dfu-test.log
 so we can observe the bulb's DHCP IP without opening its serial port.

@@ -14,14 +14,14 @@
 #include "protocol.h"
 #include "pwm_output.h"
 #include "sniffer.h"
-#include "dfu.h"
+#include "dfu2.h"
 #include "esp_system.h"  // esp_restart
 
 static const char *TAG = "controller";
 
 typedef enum {
     MSG_APPLY = 0,
-    MSG_DFU = 1,
+    MSG_DFU2 = 1,
     MSG_SET_CONFIG = 2,
     MSG_REBOOT = 3,
 } ctrl_msg_type_t;
@@ -37,6 +37,7 @@ typedef struct {
             uint8_t  len;
             uint8_t  value[PROTO_CONFIG_VALUE_MAX];
         } cfg;                      // MSG_SET_CONFIG
+        dfu2_params_t dfu2;         // MSG_DFU2
     } u;
 } ctrl_msg_t;
 
@@ -67,15 +68,15 @@ static void controller_task(void *arg) {
         ctrl_msg_t msg;
         // Wake at least once per second so the fallback timer stays responsive.
         if (xQueueReceive(s_queue, &msg, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            if (msg.type == MSG_DFU) {
-                // Read the id live so DFU uses the current CFG_BULB_ID even if a
+            if (msg.type == MSG_DFU2) {
+                // Read the id live so DFU2 uses the current CFG_BULB_ID even if a
                 // SetConfig changed it since boot.
                 const uint8_t my_id = bulb_config_get_u8(CFG_BULB_ID);
-                ESP_LOGI(TAG, "DFU requested for id %d; entering DFU mode", my_id);
-                // Hand off to a dedicated DFU task (large stack) which takes over
-                // wifi, receives an image, and reboots. The controller is no
-                // longer needed once DFU begins, so it stands down.
-                dfu_start(my_id);
+                ESP_LOGI(TAG, "DFU2 requested for id %d; entering DFU2 mode", my_id);
+                // Hand off to a dedicated DFU2 task (large stack) which takes over
+                // wifi, pulls an image, and reboots. The controller is no longer
+                // needed once DFU2 begins, so it stands down.
+                dfu2_start(my_id, &msg.u.dfu2);
                 vTaskDelete(NULL);
             } else if (msg.type == MSG_REBOOT) {
                 ESP_LOGI(TAG, "reboot requested; restarting");
@@ -143,11 +144,12 @@ void controller_notify_entry(float r, float g, float b, float ww, float cw) {
     xQueueSend(s_queue, &msg, 0);
 }
 
-void controller_notify_dfu(void) {
-    if (s_queue == NULL) {
+void controller_notify_dfu2(const dfu2_params_t *params) {
+    if (s_queue == NULL || params == NULL) {
         return;
     }
-    ctrl_msg_t msg = {.type = MSG_DFU};
+    ctrl_msg_t msg = {.type = MSG_DFU2};
+    msg.u.dfu2 = *params;
     xQueueSend(s_queue, &msg, 0);
 }
 

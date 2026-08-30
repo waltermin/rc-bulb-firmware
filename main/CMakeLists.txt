@@ -5,7 +5,7 @@ set(COMPONENT_SRCS
     "sniffer.c"
     "protocol.c"
     "controller.c"
-    "dfu.c"
+    "dfu2.c"
 )
 set(COMPONENT_ADD_INCLUDEDIRS ".")
 

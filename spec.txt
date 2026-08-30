@@ -98,3 +98,101 @@ struct RebootCommand {
     // not payload
 }
 ```
+
+## `0x05` - Dfu2Request
+
+Advertises a pull-based over-the-air firmware update (DFU v2) for a range of
+bulbs. This replaces the push-based DFU (the `0x04` EnterDfuMode command + an
+on-device TCP server): instead of the bulb waiting for a pusher to connect, the
+bulb connects *out* to an update server and pulls the image itself.
+
+Each firmware build has a **build id**: the first 8 bytes of `sha256(version)`,
+where `version` is the app-descriptor version string set per build (from
+`version.txt`). A bulb computes its own build id at runtime and both the update
+server and the base station advertise the target build id, so a bulb can tell
+whether it is already up to date. (The ESP8266 toolchain does not populate
+`app_elf_sha256`, so the version string is hashed instead.)
+
+`bulb_id_start` / `bulb_id_bounds` address a range exactly as in BulbCommand
+(`0x04`): the request applies to ids `[bulb_id_start, bulb_id_start +
+bulb_id_bounds]` inclusive. Unlike BulbCommand there is **no `seq`**: a bulb
+re-evaluates every broadcast (so one that missed the first packet, or just
+rebooted, still acts on a later identical one). Idempotency comes from the
+build-id comparison, not from a sequence gate.
+
+When an in-range bulb receives a Dfu2Request whose `build_id` differs from its
+own, it leaves promiscuous mode, joins the Wi-Fi network named by `ssid` /
+`pass`, connects over TCP to `server_ip`:`server_port`, and pulls the new image
+into its inactive OTA slot (see the DFU2 transfer protocol below). If the
+build ids match, the bulb ignores the request (it is already running the target
+build), which makes a rollout self-terminating.
+
+```
+struct Dfu2RequestPacket {
+    fmt_version: u8,       // packet format version, currently 0x01
+
+    bulb_id_start: u8,     // start of the addressed id range
+    bulb_id_bounds: u8,    // range extends by this many ids (0 => only bulb_id_start)
+
+    server_ip: [u8; 4],    // IPv4 of the update server, in dotted order (a.b.c.d)
+    server_port: u16,      // TCP port of the update server (little-endian)
+
+    build_id_len: u8,      // length of the target build id, currently 8
+    build_id: [u8; build_id_len],   // target build id = sha256(version)[:build_id_len]
+
+    ssid_len: u8,          // length of the Wi-Fi SSID (1..32)
+    ssid: [u8; ssid_len],  // Wi-Fi SSID to join for the download (not NUL-terminated)
+
+    pass_len: u8,          // length of the Wi-Fi password (0..63; 0 => open network)
+    pass: [u8; pass_len],  // Wi-Fi password (not NUL-terminated)
+}
+```
+
+### Size limit
+
+The ESP8266 Wi-Fi stack only delivers promiscuous-mode frames under 128 bytes
+total. After the 802.11 + beacon + IE + OUI + FCS overhead this leaves at most
+**70 bytes** for the vendor-IE body (the packet tag plus all Dfu2Request fields).
+The base station computes the encoded length and refuses to broadcast a request
+that would exceed this, rather than emit a truncated, undeliverable frame — so a
+short update-network SSID and password must be chosen (e.g. a 32-char SSID plus a
+63-char password will not fit alongside the other fields).
+
+### DFU2 transfer protocol (TCP, bulb -> server)
+
+Once joined to the AP, the bulb opens a TCP connection to the server and speaks
+the following, all integers little-endian:
+
+```
+// bulb -> server: hello (14 bytes)
+struct Dfu2Hello {
+    magic: u32,            // 0x32756C52 ("Rlu2")
+    fmt: u8,               // 0x01
+    bulb_id: u8,           // the bulb's own id
+    build_id: [u8; 8],     // the bulb's current build id
+}
+
+// server -> bulb: header (49 bytes), then the raw image bytes follow
+struct Dfu2Header {
+    magic: u32,            // 0x686C4352 ("RClh")
+    version: u8,           // 0x01
+    image_len: u32,        // length of the image that follows the header
+    sha256: [u8; 32],      // SHA-256 of the image
+    build_id: [u8; 8],     // build id of the served image (must equal the target)
+}
+
+// bulb -> server: single status byte (best-effort, sent just before rebooting)
+//   0 = OK (image accepted, rebooting)   1 = bad header
+//   2 = esp_ota_begin failed             3 = receive error/timeout
+//   4 = SHA-256 mismatch                 5 = esp_ota_end validation failed
+//   6 = set-boot-partition failed        7 = served build id != target
+//   8 = could not join AP / reach server
+```
+
+The bulb streams the image straight into the **inactive** OTA slot; the running
+slot is never touched, so a power loss at any point still leaves the current
+firmware bootable. Before switching the boot pointer the bulb verifies the
+advertised/served build id, the transport SHA-256, and lets the SDK validate the
+on-flash image. Only then does it flip the (dual-copy, atomic) boot pointer and
+reboot into the new build. Any failure reboots into the untouched current
+firmware, which will retry on the next Dfu2Request it hears.

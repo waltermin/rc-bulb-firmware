@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Push a firmware image to a bulb that is in DFU mode.
+"""LEGACY (DFU v1, push-based) firmware pusher — for bulbs still running the old
+push-server firmware (main/dfu.c). New firmware uses the pull-based DFU2
+(tools/dfu2_server.py + the base-station `dfu2` command); use this only to update
+legacy bulbs, including to bring one onto the DFU2 firmware for the first time.
 
-The bulb, once in DFU mode, joins the configured AP, takes a DHCP lease with
-hostname rc_light_dfu_<id>, and listens on DFU_TCP_PORT (default 3333). Find its
-IP from your AP/DHCP server's lease table (look for that hostname), then:
+The legacy bulb, once triggered into push-DFU mode (base-station `dfu`/`dfurange`),
+joins the configured AP, takes a DHCP lease with hostname rc_light_dfu_<id>, and
+listens on port 3333. Find its IP from your AP/DHCP server's lease table (look for
+that hostname), then:
 
-    python3 push_dfu.py 192.168.4.23 ../build/bulb-firmware.bin
+    python3 dfu1_push.py 192.168.4.23 ../build/bulb-firmware.bin
 
 Wire header (little-endian):  magic u32 | version u8 | image_len u32 | sha256[32]
 """

@@ -86,26 +86,36 @@
 #define PWM_PHASE_BLUE -120.0f
 #define PWM_PHASE_WW 0.0f
 
-// ---- DFU / OTA --------------------------------------------------------------
-
-// Hard-coded AP the bulb joins when entering DFU mode.
-#define DFU_AP_SSID "Recurse Light DFU"
-#define DFU_AP_PASS "changeme123"
+// ---- DFU2 / pull-based OTA --------------------------------------------------
+// DFU2 is pull-based: on a 0x05 Dfu2Request beacon (id range + AP creds + server
+// IP/port + target build id) the bulb joins the advertised AP, connects OUT to
+// the server, and pulls the image into the inactive OTA slot. The AP credentials
+// come from the packet, not from here (see dfu2.c).
 
 // DHCP client hostname is DFU_HOSTNAME_PREFIX + decimal id, e.g. rc_light_dfu_7.
+// Kept for human-readable DHCP leases / logs during an update.
 #define DFU_HOSTNAME_PREFIX "rc_light_dfu_"
 
-// TCP port the DFU firmware-push server listens on.
-#define DFU_TCP_PORT 3333
-
-// How long to wait for association + DHCP before giving up and rebooting.
-#define DFU_CONNECT_TIMEOUT_MS 30000
-
-// How long to wait for a pushing client to connect before giving up.
-#define DFU_ACCEPT_TIMEOUT_MS 120000
-
-// Magic in the DFU push header (little-endian u32). "RClh" = 0x686C4352.
+// Magic in the DFU2 transfer header and hello (little-endian u32). "RClh".
 #define DFU_OTA_MAGIC 0x686C4352u
+#define DFU2_HELLO_MAGIC 0x32756C52u   // "Rlu2" — bulb->server hello
+
+// How long to wait for association + DHCP after joining the AP before giving up
+// and rebooting (into the untouched current firmware).
+#define DFU2_CONNECT_TIMEOUT_MS 30000
+
+// After we have an IP, how long to keep retrying the TCP connect to the server
+// (it may not be listening the instant we join).
+#define DFU2_TCP_CONNECT_WINDOW_MS 30000
+
+// Per-recv stall guard once the transfer is underway (SO_RCVTIMEO).
+#define DFU2_RECV_TIMEOUT_MS 15000
+
+// Legacy: these were the fixed push-DFU AP credentials. DFU2 takes the AP from
+// the Dfu2Request packet, so they are unused by the update path now; they remain
+// only as the defaults for the (settable) CFG_DFU_SSID/CFG_DFU_PASS config keys.
+#define DFU_AP_SSID "Recurse Light DFU"
+#define DFU_AP_PASS "changeme123"
 
 // ---- optional manual rollback guard -----------------------------------------
 // ESP8266_RTOS_SDK has no esp_ota_mark_app_valid_cancel_rollback(). When this is

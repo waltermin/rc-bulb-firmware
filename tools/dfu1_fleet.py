@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Fleet DFU pusher: watch DHCP for rc_light_dfu_<id> bulbs joining the AP and
-push a firmware image to each one the moment it appears.
+"""LEGACY (DFU v1, push-based) fleet pusher — for bulbs still running the old
+push-server firmware. New firmware uses the pull-based DFU2 (tools/dfu2_server.py
++ the base-station `dfu2` command), where the server tracks progress itself; use
+this only to update legacy bulbs.
 
-    python3 tools/dfu_fleet.py 1-25 build/bulb-firmware.bin -i Wi-Fi
+Watch DHCP for rc_light_dfu_<id> bulbs joining the AP and push a firmware image to
+each one the moment it appears.
+
+    python3 tools/dfu1_fleet.py 1-25 build/bulb-firmware.bin -i Wi-Fi
 
 How it works
   * tshark sniffs DHCP on the given interface. A bulb's DHCP Request is a
     broadcast that carries its hostname (option 12) and the IP it is taking
     (option 50 / ciaddr), so we learn id -> ip without router access.
-  * Each new join spawns an asynchronous `push_dfu.py <ip> <image>`.
-  * The bulb's DFU server accepts exactly ONE client per DFU boot
-    (main/dfu.c), so a failed push is only retried when that id is seen
-    joining again (power-cycle / re-trigger DFU). Connection-refused right
-    after the join (server not listening yet) is retried quickly in-place.
+  * Each new join spawns an asynchronous `dfu1_push.py <ip> <image>`.
+  * The legacy bulb's DFU server accepts exactly ONE client per DFU boot, so a
+    failed push is only retried when that id is seen joining again (power-cycle /
+    re-trigger DFU). Connection-refused right after the join (server not listening
+    yet) is retried quickly in-place.
   * State for every id in the range is kept in memory and mirrored to a JSON
     file (--state) after each change; a summary table prints on change and
     on exit.
@@ -34,7 +39,7 @@ from datetime import datetime
 HOST_PREFIX = "rc_light_dfu_"
 HOST_RE = re.compile(re.escape(HOST_PREFIX) + r"(\d+)$")
 HERE = os.path.dirname(os.path.abspath(__file__))
-PUSH_DFU = os.path.join(HERE, "push_dfu.py")
+PUSH_DFU = os.path.join(HERE, "dfu1_push.py")
 
 # DHCP message types (option 53)
 DHCP_REQUEST = "3"
@@ -302,7 +307,7 @@ def main():
     ap.add_argument("-i", "--interface", default="Wi-Fi",
                     help="capture interface name/number (tshark -D)")
     ap.add_argument("--tshark", help="path to tshark")
-    ap.add_argument("-p", "--port", type=int, help="DFU TCP port (default push_dfu.py's 3333)")
+    ap.add_argument("-p", "--port", type=int, help="DFU TCP port (default dfu1_push.py's 3333)")
     ap.add_argument("--state", default="dfu_fleet_state.json",
                     help="JSON file mirrored on every change ('' to disable)")
     ap.add_argument("--max-parallel", type=int, default=4,
@@ -314,11 +319,11 @@ def main():
     ap.add_argument("--connect-window", type=float, default=20.0,
                     help="seconds to keep retrying 'connection refused' after a join")
     ap.add_argument("--push-timeout", type=float, default=60.0,
-                    help="socket timeout passed to push_dfu.py")
+                    help="socket timeout passed to dfu1_push.py")
     ap.add_argument("--deadline", type=float, default=0,
                     help="give up after this many seconds (0 = run until Ctrl-C)")
     ap.add_argument("-v", "--verbose", action="store_true",
-                    help="echo push_dfu.py output and out-of-range joins")
+                    help="echo dfu1_push.py output and out-of-range joins")
     ap.add_argument("--verbose-table", action="store_true",
                     help="list every id in the table, including waiting ones")
     args = ap.parse_args()
@@ -326,7 +331,7 @@ def main():
     if not os.path.isfile(args.image):
         sys.exit(f"image not found: {args.image}")
     if not os.path.isfile(PUSH_DFU):
-        sys.exit(f"push_dfu.py not found next to this script: {PUSH_DFU}")
+        sys.exit(f"dfu1_push.py not found next to this script: {PUSH_DFU}")
     ids = parse_range(args.ids)
     tshark = find_tshark(args.tshark)
     fleet = Fleet(ids, os.path.abspath(args.image), args)
