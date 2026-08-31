@@ -89,20 +89,32 @@
 // state byte supports up to 8 channels; this is the real hardware maximum.
 #define PWM_MAX_CHANNELS 5
 
-// Jitter control. The ISR arms the FRC1 one-shot to fire PWM_AHEAD_TICKS ticks
-// BEFORE the next edge (a RELATIVE, schedule-derived delay — always bounded), then
-// busy-waits a short, hard-capped spin on the CPU cycle counter (CCOUNT) to toggle
-// the GPIO at the edge's exact time. The spin absorbs interrupt-entry latency: as
-// long as latency < PWM_AHEAD_TICKS the edge lands on time, so duty cycles stay
-// precise and the LEDs don't flicker. Bigger absorbs more latency but spins longer
-// (up to ~PWM_AHEAD_TICKS per edge); 40 ticks = 8 us matches the stock SDK PWM's
-// margin. Lower it if CPU-bound with low latency; raise it if flicker persists.
-#define PWM_AHEAD_TICKS 75
+// Jitter control. The engine rides the Wi-Fi WDEV/TSF0 timer: it arms a compare to
+// fire PWM_AHEAD_TICKS ticks BEFORE the next edge (a RELATIVE, schedule-derived
+// delay — always bounded), then busy-waits a short, hard-capped spin on the CPU
+// cycle counter (CCOUNT) to toggle the GPIO at the edge's exact time. Because the
+// WDEV interrupt runs at Wi-Fi priority — above the level-1 critical sections that
+// caused FRC1's flicker — latency is low and consistent, so a small window suffices.
+// NOTE: at Wi-Fi priority the spin briefly delays the radio, so SMALLER is now
+// better (less sniffer impact): 40 ticks = 8 us matches the stock SDK PWM's margin.
+// Raise only if residual flicker appears; lower to reduce RX impact.
+#define PWM_AHEAD_TICKS 40
 
-// Hard ceiling on a single spin, as a multiple of the ahead window. The spin should
-// never need more than PWM_AHEAD_TICKS; this is a pure safety valve so a bad target
-// can never hang the CPU — past it the ISR gives up spinning and applies the edge.
-#define PWM_SPIN_CAP_TICKS (PWM_AHEAD_TICKS * 2)
+// Upper bound on a "late edge" the re-anchor will act on, in ticks. A real edge is
+// never later than roughly one period; a jump of ~one RTOS tick (~10 ms = 50000
+// ticks) is the monotonic clock's rare read glitch, not real lateness. Re-anchoring
+// to such a value would corrupt the timebase, so the ISR ignores lateness beyond
+// this. Keep it well above the largest period (2^PWM_PERIOD_LOG2_MAX) and well below
+// one tick's worth of ticks (~50000).
+#define PWM_REANCHOR_MAX_TICKS 20000
+
+// Hard ceiling on a single spin, in loop iterations (NOT time): a pure safety valve
+// so the spin always terminates even if the monotonic clock momentarily freezes
+// (which it does for a few ns when our NMI preempts the RTOS tick handler mid-update
+// — see mono_clock.h). Must comfortably exceed the normal spin length, which is
+// ~PWM_AHEAD_TICKS ticks of wall time (a few hundred iterations); 512 covers the
+// default with margin. Raise it in step with PWM_AHEAD_TICKS.
+#define PWM_SPIN_MAX_ITERS 512
 
 // The ISR spins through ("coalesces") edges closer together than the arm-ahead
 // window instead of taking a fresh interrupt for each. This caps how long one ISR
@@ -119,6 +131,15 @@
 // Guarded so a build can force it on with -DPWM_DEBUG_DUMP=1 without editing here.
 #ifndef PWM_DEBUG_DUMP
 #define PWM_DEBUG_DUMP 1
+#endif
+
+// Debug: when 1, the edge ISR bumps lightweight DRAM counters (no printf in the
+// ISR) and a 1 Hz task prints them — invocation rate, the largest gap between ISR
+// invocations, and how often edges were applied late (re-anchor) or the spin hit
+// its cap. Used to diagnose flicker: a huge maxgap means the ISR was starved; a
+// burst of reanchors/spincap means edges fired at the wrong time. Keep 0 in ships.
+#ifndef PWM_PROFILE
+#define PWM_PROFILE 1
 #endif
 
 // The CPU cycles per 200 ns tick used to convert schedule ticks <-> the CCOUNT

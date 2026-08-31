@@ -52,8 +52,9 @@ void app_main(void) {
     // 2. Load the config cache (NVS-or-default) before any consumer reads it.
     bulb_config_init();
 
-    // 3. LEDs — GPIO/PWM configured, FRC1 timer started, default color lit. The
-    //    engine needs no radio, so the bulb shows its default color from here on.
+    // 3. LEDs — GPIO/PWM configured, default color compiled and shown as a static
+    //    level. Real PWM starts in step 7: the engine rides the Wi-Fi WDEV/TSF0
+    //    timer (for glitch-free, Wi-Fi-priority edge timing), which needs the radio.
     pwm_output_init();
 
 #ifdef DFU_ROLLBACK_GUARD
@@ -64,8 +65,12 @@ void app_main(void) {
     // 5. Identity.
     uint8_t my_id = bulb_config_get_u8(CFG_BULB_ID);
 
-    // 6. Radio up in promiscuous mode. (The LEDs are already lit from step 3.)
+    // 6. Radio up in promiscuous mode.
     wifi_init_promiscuous();
+
+    // 7. The WDEV/TSF0 timer the PWM engine rides only ticks now that the radio is
+    //    started — begin real PWM output (the LED has shown a static default so far).
+    pwm_output_start_after_radio();
 
     controller_start();
     sniffer_start();

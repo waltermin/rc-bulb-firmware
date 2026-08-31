@@ -21,10 +21,15 @@ extern "C" {
 #endif
 
 // Initialize the PWM engine: configure the channel GPIOs as outputs, build the
-// state->GPIO lookup tables, start the FRC1 timer, and apply the default color.
-// Unlike the old SDK-PWM path this needs no radio, so the LEDs light here — call
-// it early in app_main.
+// state->GPIO lookup tables, compile the default color, and drive its static level.
+// The engine rides the Wi-Fi WDEV/TSF0 timer (for glitch-free, WiFi-priority edge
+// timing), which does not tick until the radio is up — so this only shows a static
+// color; pwm_output_start_after_radio() begins actual PWM. Call early in app_main.
 void pwm_output_init(void);
+
+// Register the WDEV/TSF0 timer interrupt and start real PWM output. Call once, just
+// after esp_wifi_start() — the TSF timer this engine rides only runs with the radio.
+void pwm_output_start_after_radio(void);
 
 // Set all five channels from normalized levels in [0.0, 1.0] (clamped to range).
 // The gamma/perceptual curve, max-power cap, per-channel phase and period are all

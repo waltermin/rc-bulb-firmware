@@ -2,6 +2,7 @@ set(COMPONENT_SRCS
     "app_main.c"
     "pwm_output.c"
     "pwm_schedule.c"
+    "mono_clock.c"
     "bulb_config.c"
     "sniffer.c"
     "protocol.c"

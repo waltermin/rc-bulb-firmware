@@ -18,17 +18,27 @@
 #include <math.h>
 #include <stdbool.h>
 #include <string.h>
+#if PWM_PROFILE
+#include <stdio.h>  // printf, from the 1 Hz profile task (not the ISR)
+#endif
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "driver/hw_timer.h"
 #include "driver/gpio.h"
 #include "driver/soc.h"            // soc_get_ccount()
 #include "esp_clk.h"               // esp_clk_cpu_freq()
 #include "esp8266/gpio_struct.h"   // GPIO.out_w1ts / out_w1tc
-#include "esp8266/timer_struct.h"  // frc1
+#include "esp8266/eagle_soc.h"     // WDEV/TSF0 timer registers, REG_READ/WRITE
 #include "esp_attr.h"              // IRAM_ATTR / DRAM_ATTR
+
+#include "mono_clock.h"            // mono_ccount(), mono_clock_start()
+
+// Private Wi-Fi-library hook: registers a callback into the WDEV/TSF0 (Wi-Fi MAC)
+// timer's compare interrupt — the same high-priority timer the stock SDK PWM rides.
+// Running our edge ISR here (above the level-1 critical sections that delayed the
+// FRC1 timer) is what gives glitch-free output.
+extern int wDev_MacTimSetFunc(void (*handle)(void));
 #include "esp_log.h"
 
 #include "config.h"
@@ -170,37 +180,114 @@ static uint32_t s_target;
 // libgcc divide is flash-resident — unsafe in the OTA-safe ISR).
 static uint32_t s_cyc_shift;
 
-// ---- FRC1 ISR ---------------------------------------------------------------
+#if PWM_PROFILE
+// ISR profiling to characterize the timing/clock behavior. The ISR only bumps these
+// DRAM counters; pwm_profile_task prints and clears them once per second. Together
+// they distinguish: CCOUNT misbehaving (bkwd), the ISR being starved (fgap), our
+// CCOUNT target drifting vs the TSF-paced interrupt (ahead), the spin maxing out
+// (spin/scap), and edges landing late (reanchor). tsf samples where the WDEV fired.
+static volatile uint32_t s_prof_last;       // CCOUNT at the previous ISR entry
+static volatile uint32_t s_prof_invocs;     // ISR invocations since last print
+static volatile uint32_t s_prof_reanchor;   // edges applied late (re-anchor fired)
+static volatile uint32_t s_prof_spincap;    // spin hit its hard cap
+static volatile uint32_t s_prof_bkwd;       // CCOUNT went backwards (count)
+static volatile uint32_t s_prof_bkwd_max;   // largest backward step (cycles)
+static volatile uint32_t s_prof_fgap_max;   // largest forward inter-ISR gap (cycles)
+static volatile int32_t  s_prof_ahead_max;  // max (s_target - now) at entry (signed cyc)
+static volatile int32_t  s_prof_ahead_min;  // min (s_target - now) at entry
+static volatile uint32_t s_prof_spin_max;   // largest actual spin duration (cycles)
+static volatile uint32_t s_prof_tsf;        // TSF LO when the ISR was entered (sample)
+#endif
+
+// ---- WDEV/TSF0 timer arming -------------------------------------------------
+// The WDEV timer is a free-running 1 us (TSF-tick) counter with a compare register;
+// its compare interrupt runs at Wi-Fi priority. We use it purely as a coarse wake:
+// arm it to fire a few TSF ticks before the next edge, then the ISR's CCOUNT spin
+// lands the toggle precisely — so the 1 us granularity here does not limit our
+// 200 ns precision. This replicates the SDK PWM driver's exact register sequence
+// (freeze TSF update -> disable compare -> zero counter -> set relative compare ->
+// re-enable -> thaw), which is proven to coexist with the Wi-Fi stack.
+#define WDEV_MIN_WAKE_TSF 2u  // SDK requires the relative compare be at least ~2
+
+static inline void IRAM_ATTR wdev_arm(uint32_t wake_ticks) {
+    // wake_ticks is in engine ticks (200 ns); the TSF counts in 1 us, so /5. The
+    // remainder is absorbed by the spin, so truncation is harmless.
+    uint32_t wake_tsf = wake_ticks / PWM_TICKS_PER_US;
+    if (wake_tsf < WDEV_MIN_WAKE_TSF) wake_tsf = WDEV_MIN_WAKE_TSF;
+    REG_WRITE(WDEVSLEEP0_CONF, REG_READ(WDEVSLEEP0_CONF) & ~WDEV_TSFUP0_ENA);
+    REG_WRITE(WDEVTSF0TIMER_ENA, REG_READ(WDEVTSF0TIMER_ENA) & ~WDEV_TSF0TIMER_ENA);
+    REG_WRITE(WDEVTSFSW0_LO, 0);
+    REG_WRITE(WDEVTSF0_TIMER_LO, wake_tsf);
+    REG_WRITE(WDEVTSF0TIMER_ENA, WDEV_TSF0TIMER_ENA);
+    REG_WRITE(WDEVSLEEP0_CONF, REG_READ(WDEVSLEEP0_CONF) | WDEV_TSFUP0_ENA);
+}
+
+// ---- edge ISR (WDEV/TSF0 timer, Wi-Fi priority) -----------------------------
 // Applies each edge, placing the GPIO toggle at its exact time to keep PWM jitter-
 // free, but bounded on every axis so it can never run away:
 //   * ARM is RELATIVE and schedule-derived: gap - PWM_AHEAD_TICKS ticks (gap is the
 //     tick delta to the next edge). Always in [1, length]; never wall-clock-derived,
 //     so never 0 and never huge. This is what makes the timer pacing robust.
-//   * SPIN is short and HARD-CAPPED: we fire ~PWM_AHEAD_TICKS early and spin on
+//   * SPIN is short and HARD-CAPPED: we wake ~PWM_AHEAD_TICKS early and spin on
 //     CCOUNT to the edge's exact target, but bail after PWM_SPIN_CAP_TICKS so the
-//     ISR can never hold the CPU for long (no watchdog).
+//     ISR can never hold the CPU for long (and, at Wi-Fi priority, never stalls the
+//     radio for long).
 //   * TARGET is re-anchored: it advances by exact tick gaps (locking the frequency
 //     to the CPU clock), but snaps to "now" if an edge is applied late by more than
 //     the spin window — bounding it to within one edge of real time, both ways.
-// Touches only RAM + GPIO/FRC1 regs + CCOUNT — OTA-safe.
-static void IRAM_ATTR pwm_isr(void *arg) {
-    (void)arg;
+// Signature is void(void): it is called from the Wi-Fi TSF0 interrupt via
+// wDev_MacTimSetFunc. Touches only RAM + GPIO/WDEV regs + CCOUNT — OTA-safe.
+static void IRAM_ATTR pwm_isr(void) {
     const pwm_schedule_t *sch = &s_sched[s_active];
     uint16_t idx = s_idx;
     int coalesced = 0;  // edges handled inline this invocation (dwell guard)
 
     const int32_t ahead = (int32_t)(PWM_AHEAD_TICKS << s_cyc_shift);
-    const uint32_t spin_cap = (uint32_t)(PWM_SPIN_CAP_TICKS << s_cyc_shift);
+
+#if PWM_PROFILE
+    {
+        const uint32_t n0 = mono_ccount();
+        const int32_t g = (int32_t)(n0 - s_prof_last);  // signed: <0 == went backwards
+        s_prof_last = n0;
+        s_prof_invocs++;
+        if (g < 0) {
+            s_prof_bkwd++;
+            if ((uint32_t)(-g) > s_prof_bkwd_max) s_prof_bkwd_max = (uint32_t)(-g);
+        } else if ((uint32_t)g > s_prof_fgap_max) {
+            s_prof_fgap_max = (uint32_t)g;
+        }
+        const int32_t ah = (int32_t)(s_target - n0);  // how far ahead the target is
+        if (ah > s_prof_ahead_max) s_prof_ahead_max = ah;
+        if (ah < s_prof_ahead_min) s_prof_ahead_min = ah;
+        s_prof_tsf = REG_READ(WDEVTSF0_TIME_LO);
+    }
+#endif
 
     for (;;) {
         // Spin to this edge's exact target, then toggle. We were armed to fire a
         // little early, so the spin is short; a hard cap guarantees it can't hang if
         // the target is ever bad, and if we arrived late the test is already true so
         // we apply immediately.
-        const uint32_t spin_start = soc_get_ccount();
-        while ((int32_t)(soc_get_ccount() - s_target) < 0) {
-            if ((soc_get_ccount() - spin_start) >= spin_cap) break;  // safety valve
+        const uint32_t spin_start = mono_ccount();
+        uint32_t spin_iters = 0;
+        // Spin to the exact target. The cap is an ITERATION count, not a clock delta:
+        // if mono_ccount() momentarily freezes (we preempted the tick handler mid-
+        // update), a clock-based cap could never fire -> infinite NMI spin -> hang.
+        // An iteration counter always advances, guaranteeing termination.
+        while ((int32_t)(mono_ccount() - s_target) < 0) {
+            if (++spin_iters >= PWM_SPIN_MAX_ITERS) {  // safety valve
+#if PWM_PROFILE
+                s_prof_spincap++;
+#endif
+                break;
+            }
         }
+#if PWM_PROFILE
+        {
+            const uint32_t sd = mono_ccount() - spin_start;
+            if (sd > s_prof_spin_max) s_prof_spin_max = sd;
+        }
+#endif
 
         const uint8_t st = PWM_EDGE_STATE(sch->edges[idx]);
         GPIO.out_w1ts = s_set_lut[st];
@@ -210,8 +297,12 @@ static void IRAM_ATTR pwm_isr(void *arg) {
         // ISR was starved, e.g. by phy_init), catch the timeline up to now so the
         // lateness doesn't propagate. Normal small overruns are left alone so the
         // target stays exactly on the tick grid (frequency locked).
-        if ((int32_t)(soc_get_ccount() - s_target) > ahead) {
-            s_target = soc_get_ccount();
+        const int32_t late = (int32_t)(mono_ccount() - s_target);
+        if (late > ahead && late < (int32_t)(PWM_REANCHOR_MAX_TICKS << s_cyc_shift)) {
+            s_target += (uint32_t)late;  // == mono_ccount(); one read, no re-glitch
+#if PWM_PROFILE
+            s_prof_reanchor++;
+#endif
         }
 
         // Gap (tick delta) to the next edge, and advance the absolute target by it.
@@ -235,16 +326,14 @@ static void IRAM_ATTR pwm_isr(void *arg) {
 
         // If the next edge is within the arm-ahead window, spin through it inline
         // (bounded by the coalesce cap) rather than take another interrupt; else arm
-        // the one-shot to fire ~PWM_AHEAD_TICKS before it. The arm is always a sane
-        // relative delay. The trampoline already cleared en; load.data then en=1
-        // loads the new count and counts down.
+        // the WDEV compare to fire ~PWM_AHEAD_TICKS before it. The arm is always a
+        // sane relative delay.
         if (gap <= PWM_AHEAD_TICKS && coalesced < PWM_MAX_COALESCE) {
             coalesced++;
             continue;
         }
         s_idx = idx;
-        frc1.load.data = (gap > PWM_AHEAD_TICKS) ? (gap - PWM_AHEAD_TICKS) : 1u;
-        frc1.ctrl.en = 1;
+        wdev_arm(gap - PWM_AHEAD_TICKS);  // gap > PWM_AHEAD_TICKS here
         return;
     }
 }
@@ -285,7 +374,7 @@ static void build_reqs(color5_t duties, pwm_chan_req_t reqs[PWM_CHANNELS]) {
 // only from a critical section while the timer is idle (init).
 static void engine_first_arm(void) {
     const pwm_schedule_t *sch = &s_sched[s_active];
-    const uint32_t now = soc_get_ccount();  // this edge (entry 0) is applied now
+    const uint32_t now = mono_ccount();  // this edge (entry 0) is applied now
     const uint8_t st0 = PWM_EDGE_STATE(sch->edges[0]);
     GPIO.out_w1ts = s_set_lut[st0];
     GPIO.out_w1tc = s_clr_lut[st0];
@@ -300,8 +389,7 @@ static void engine_first_arm(void) {
         s_idx = 0;
     }
     s_target = now + (gap << s_cyc_shift);
-    frc1.load.data = (gap > PWM_AHEAD_TICKS) ? (gap - PWM_AHEAD_TICKS) : 1u;
-    frc1.ctrl.en = 1;
+    wdev_arm(gap > PWM_AHEAD_TICKS ? gap - PWM_AHEAD_TICKS : 1u);
     s_running = true;
 }
 
@@ -418,29 +506,84 @@ void pwm_output_init(void) {
     gpio_config(&io);
     GPIO.out_w1tc = s_all_pins;  // all low
 
-    // FRC1 at clkdiv16 -> 200 ns/tick, one-shot, edge interrupt. hw_timer_init
-    // registers our ISR and unmasks the line; the timer stays disarmed until
-    // engine_first_arm() sets the compare and enables it. NOTE: hw_timer_disarm()
-    // zeroes the whole control register (clkdiv/reload/intr included), so it must
-    // run BEFORE we set those — otherwise the divider reverts to clkdiv1 (80 MHz)
-    // and every tick would be 16x too short.
-    ESP_ERROR_CHECK(hw_timer_init(pwm_isr, NULL));
-    hw_timer_disarm();
-    hw_timer_set_clkdiv(TIMER_CLKDIV_16);
-    hw_timer_set_reload(false);
-    hw_timer_set_intr_type(TIMER_EDGE_INT);
-
     s_active = 0;
     s_running = false;
     s_update_pending = false;
     s_idx = 0;
 
-    // Compile + light the default color now — no radio needed (FRC1 ticks from boot).
-    pwm_output_set_default();
+    // Compile the default color and drive its static t=0 level now. Real PWM does
+    // not start until pwm_output_start_after_radio() — the WDEV/TSF0 timer this
+    // engine rides only ticks once the radio is up. So for the brief pre-radio
+    // window the LED shows the default's static state (e.g. warm-white on), then
+    // begins modulating. Compile here (not via publish_reqs) so nothing arms the
+    // timer yet; record the reqs so a later identical set_default dedups.
+    color5_t duties = compute_duties(bulb_config_get_float(CFG_DEFAULT_R),
+                                     bulb_config_get_float(CFG_DEFAULT_G),
+                                     bulb_config_get_float(CFG_DEFAULT_B),
+                                     bulb_config_get_float(CFG_DEFAULT_WW),
+                                     bulb_config_get_float(CFG_DEFAULT_CW));
+    pwm_chan_req_t reqs[PWM_CHANNELS];
+    build_reqs(duties, reqs);
+    pwm_compile(reqs, PWM_CHANNELS, &s_sched[0]);
+    memcpy(s_last_reqs, reqs, sizeof s_last_reqs);
+    s_have_last_reqs = true;
+    const uint8_t st0 = PWM_EDGE_STATE(s_sched[0].edges[0]);
+    GPIO.out_w1ts = s_set_lut[st0];
+    GPIO.out_w1tc = s_clr_lut[st0];
 
     ESP_LOGI(TAG, "pwm init: %d channels, %d ns/tick, cpu %d MHz -> cyc_shift %u, "
              "default period 2^%d ticks%s",
              PWM_CHANNELS, PWM_TICK_NS, esp_clk_cpu_freq() / 1000000,
              (unsigned)s_cyc_shift, PWM_DEFAULT_PERIOD_LOG2,
              OMIT_I2C_PINS ? " (green+blue omitted: GPIO12/14 left for I2C)" : "");
+}
+
+#if PWM_PROFILE
+static void pwm_profile_task(void *arg) {
+    (void)arg;
+    const int32_t cpus = (int32_t)(esp_clk_cpu_freq() / 1000000);  // cycles per us
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        const uint32_t inv = s_prof_invocs; s_prof_invocs = 0;
+        const uint32_t ra  = s_prof_reanchor; s_prof_reanchor = 0;
+        const uint32_t sc  = s_prof_spincap;  s_prof_spincap = 0;
+        const uint32_t bk  = s_prof_bkwd; s_prof_bkwd = 0;
+        const uint32_t bkm = s_prof_bkwd_max; s_prof_bkwd_max = 0;
+        const uint32_t fg  = s_prof_fgap_max; s_prof_fgap_max = 0;
+        const int32_t  ahx = s_prof_ahead_max; s_prof_ahead_max = INT32_MIN;
+        const int32_t  ahn = s_prof_ahead_min; s_prof_ahead_min = INT32_MAX;
+        const uint32_t spm = s_prof_spin_max; s_prof_spin_max = 0;
+        const uint32_t tsf = s_prof_tsf;
+        printf("[pwmprof] inv=%u fgap=%d us bkwd=%u/%d us ahead=[%d,%d] us spin=%d us "
+               "reanc=%u scap=%u tsf=%u\n",
+               inv, (int)fg / cpus, bk, (int)bkm / cpus,
+               ahn / cpus, ahx / cpus, (int)spm / cpus, ra, sc, tsf);
+    }
+}
+#endif
+
+void pwm_output_start_after_radio(void) {
+    // Install the monotonic-clock tick shim so mono_ccount() is glitch-free (our edge
+    // timing rides it). See mono_clock.h — needs the scheduler running, which it is.
+    mono_clock_start();
+
+    // Register our edge ISR into the Wi-Fi TSF0 timer interrupt, then start real PWM.
+    // The TSF timer only runs now that esp_wifi_start() has brought the radio up.
+    wDev_MacTimSetFunc(pwm_isr);
+
+    portENTER_CRITICAL();
+    engine_first_arm();  // apply t=0, seed the CCOUNT target, arm the WDEV compare
+    // Enable the TSF0 interrupt only AFTER the compare is armed at a fresh future
+    // value (the exact enable the SDK PWM does), so the first interrupt fires from
+    // our schedule rather than a stale compare with s_target uninitialized.
+    REG_WRITE(PERIPHS_DPORT_BASEADDR, (REG_READ(PERIPHS_DPORT_BASEADDR) & ~0x1F) | 0x1);
+    REG_WRITE(INT_ENA_WDEV, REG_READ(INT_ENA_WDEV) | WDEV_TSF0_REACH_INT);
+    portEXIT_CRITICAL();
+    ESP_LOGI(TAG, "pwm started (WDEV/TSF0 timer, ahead %d ticks)", PWM_AHEAD_TICKS);
+
+#if PWM_PROFILE
+    s_prof_ahead_max = INT32_MIN;
+    s_prof_ahead_min = INT32_MAX;
+    xTaskCreate(pwm_profile_task, "pwmprof", 2048, NULL, 2, NULL);
+#endif
 }
