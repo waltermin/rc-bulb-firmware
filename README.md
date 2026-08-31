@@ -30,8 +30,13 @@ purpose-built control path:
 | Cold White | 5 |
 | Warm White | 13 |
 
-PWM runs at 250 Hz, capped at 80 % duty, gamma 2.8, with the stock per-channel
-phase offsets — all configurable in `main/config.h`.
+PWM is driven by a custom software engine (`pwm_output.*` + `pwm_schedule.*`) on
+the ESP8266 FRC1 hardware timer, so it needs no radio and the LEDs light at boot.
+Each channel gets its own duty, phase, and PWM rate: periods are powers of two in
+200 ns ticks, so all channels are harmonics that stack into one repeatable edge
+table walked by an IRAM-resident ISR. Fine (200 ns) ticks keep the dimmest pulses
+sharp instead of quantizing them to 1 µs. Capped at 80 % duty, gamma 2.8; the
+default rate is ~1.2 kHz (`2^12` ticks) — all configurable in `main/config.h`.
 
 ## Layout
 
@@ -39,7 +44,8 @@ phase offsets — all configurable in `main/config.h`.
 main/
   config.h        all tunables (#defines)
   app_main.c      startup ordering + wiring
-  pwm_output.*    5-channel PWM (gamma + max_power + phase)
+  pwm_output.*    5-channel PWM engine (curve + max_power; FRC1 ISR + GPIO)
+  pwm_schedule.*  pure per-channel duty/phase/period -> edge-table compiler
   id_store.*      bulb id from NVS
   sniffer.*       promiscuous RX -> parser -> controller (+ build-id gate for DFU2)
   protocol.*      pure, host-testable frame/packet parser

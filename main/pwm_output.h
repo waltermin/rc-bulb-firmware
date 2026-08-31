@@ -1,10 +1,15 @@
-// pwm_output.h — 5-channel LED PWM, matching stock bulb behavior
-// (250 Hz base, 80% max power, gamma 2.8, phase-aligned channels).
+// pwm_output.h — 5-channel LED PWM on a custom, self-contained software engine.
 //
-// The drive algorithm (how a color becomes concrete PWM period/duty/phase) is
-// isolated in compute_frame() inside pwm_output.c — that is the single place to
-// change to experiment with different duty curves, phase layouts, or a dynamic
-// period.
+// Each channel has its own duty, phase, and period. The engine runs on the
+// ESP8266 FRC1 hardware timer (radio-independent, 200 ns ticks) and compiles the
+// channels into one repeatable edge table walked by an IRAM-resident ISR, so the
+// LEDs light immediately at boot and keep running through OTA flash writes.
+//
+// The drive path is: pwm_output_set() runs the duty-response curve + max-power cap
+// (levels_to_duties()), then pwm_compile() (in pwm_schedule.c) turns per-channel
+// {duty, phase, period} into the edge table. To experiment with duty curves,
+// change levels_to_duties(); to experiment with the schedule/edge model, change
+// pwm_schedule.c — nothing else needs to move.
 
 #ifndef BULB_PWM_OUTPUT_H
 #define BULB_PWM_OUTPUT_H
@@ -15,26 +20,18 @@
 extern "C" {
 #endif
 
-// Initialize the PWM peripheral (GPIO config, phases, default color) and issue
-// a first start. Call this early in app_main. NOTE: the SDK PWM driver clocks
-// its ISR off the Wi-Fi (WDEV/TSF0) hardware timer, which does not tick until
-// the radio is started, so this early start does not yet produce light on its
-// own — pwm_output_start_after_radio() below must be called once the radio is
-// up to actually begin output.
+// Initialize the PWM engine: configure the channel GPIOs as outputs, build the
+// state->GPIO lookup tables, start the FRC1 timer, and apply the default color.
+// Unlike the old SDK-PWM path this needs no radio, so the LEDs light here — call
+// it early in app_main.
 void pwm_output_init(void);
 
-// Re-arm the PWM driver once the radio (esp_wifi_start) is running, so its
-// WDEV-timer ISR actually fires and the LEDs light at the default color. Call
-// exactly once, right after Wi-Fi init. Without this the LEDs stay dark until
-// some later event happens to kick the driver.
-void pwm_output_start_after_radio(void);
-
-// Set all five channels from normalized duty cycles in [0.0, 1.0] (values are
-// clamped to that range). The gamma curve, max-power cap, phase offsets, and
-// PWM period are all applied internally by the drive algorithm.
+// Set all five channels from normalized levels in [0.0, 1.0] (clamped to range).
+// The gamma/perceptual curve, max-power cap, per-channel phase and period are all
+// applied internally; the new frame is published to the ISR glitch-free.
 void pwm_output_set(float r, float g, float b, float ww, float cw);
 
-// Apply the compile-time DEFAULT_* color. Idempotent.
+// Apply the compile-time / NVS DEFAULT_* color. Idempotent.
 void pwm_output_set_default(void);
 
 #ifdef __cplusplus

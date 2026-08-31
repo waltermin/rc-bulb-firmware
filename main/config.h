@@ -56,8 +56,57 @@
 // The active channel set is derived from OMIT_I2C_PINS in pwm_output.c (channel
 // indices are generated there, not hard-coded here).
 
-#define PWM_FREQ_HZ 1000
-#define PWM_PERIOD_US (1000000 / PWM_FREQ_HZ)  // 1000 us at 1000 Hz
+// ---- PWM engine timing model (custom FRC1-driven software PWM) --------------
+// The engine (pwm_schedule.*/pwm_output.c) runs on the ESP8266 FRC1 hardware
+// timer at clkdiv16, so one timer tick = 200 ns (5 ticks/us). EVERYTHING in the
+// schedule — block lengths, on/off times, phase, edge offsets — is counted in
+// these ticks, never in microseconds. Finer-than-us ticks let the dimmest pulses
+// stay sharp (down to a couple hundred ns) instead of being quantized to 1 us.
+#define PWM_TICK_NS 200
+#define PWM_TICKS_PER_US 5
+
+// Each channel's PWM period is a power-of-two number of ticks: period = 2^n ticks
+// (so all channels are harmonics and stack into one repeatable schedule). n is
+// bounded so the compiled edge table stays small; widen only with an eye on
+// PWM_MAX_EDGES / DRAM (see pwm_schedule.h). At 200 ns/tick:
+//   n=10 -> 1024 ticks = 204.8 us ~= 4.9 kHz
+//   n=12 -> 4096 ticks = 819.2 us ~= 1.22 kHz   (the interim default)
+//   n=16 -> 65536 ticks = 13.1 ms ~= 76 Hz
+#define PWM_PERIOD_LOG2_MIN 10
+#define PWM_PERIOD_LOG2_MAX 16
+#define PWM_DEFAULT_PERIOD_LOG2 12  // ~1.22 kHz; used until the dynamic-rate algo lands
+
+// Per-physical-channel period exponent. All default to PWM_DEFAULT_PERIOD_LOG2
+// today; a future fidelity-driven algorithm will vary these per channel.
+#define PWM_PERIOD_LOG2_CW    PWM_DEFAULT_PERIOD_LOG2
+#define PWM_PERIOD_LOG2_RED   PWM_DEFAULT_PERIOD_LOG2
+#define PWM_PERIOD_LOG2_GREEN PWM_DEFAULT_PERIOD_LOG2
+#define PWM_PERIOD_LOG2_BLUE  PWM_DEFAULT_PERIOD_LOG2
+#define PWM_PERIOD_LOG2_WW    PWM_DEFAULT_PERIOD_LOG2
+
+// Number of physical PWM channels the hardware has (RGB + cold/warm white). Used
+// to bound the compiled edge-table size (pwm_schedule.h). The engine's per-edge
+// state byte supports up to 8 channels; this is the real hardware maximum.
+#define PWM_MAX_CHANNELS 5
+
+// Near/far edge split: if the next edge is within this many ticks, the ISR busy-
+// waits (CCOUNT spin) and applies it inline instead of paying a fresh interrupt.
+// ~25 ticks = 5 us, comfortably above interrupt entry/exit + re-arm overhead.
+#define PWM_BUSYWAIT_TICKS 25
+
+// Cap on how many near edges the ISR may coalesce (busy-wait through) in a single
+// invocation. Bounds worst-case in-ISR dwell — and thus how long interrupts stay
+// masked — to ~PWM_MAX_COALESCE * PWM_BUSYWAIT_TICKS ticks even for a pathological
+// schedule that packs edges tightly; past the cap it arms the timer instead.
+#define PWM_MAX_COALESCE 8
+
+// CPU cycles per 200 ns tick, for the CCOUNT busy-wait. 80 MHz -> 16, 160 -> 32.
+#ifdef CONFIG_ESP8266_DEFAULT_CPU_FREQ_160
+#define PWM_CPU_MHZ 160
+#else
+#define PWM_CPU_MHZ 80
+#endif
+#define PWM_CYCLES_PER_TICK ((PWM_CPU_MHZ * PWM_TICK_NS) / 1000)
 
 // Fraction of full scale the LEDs are allowed to reach (stock caps at 80%).
 #define PWM_MAX_POWER 0.80f
@@ -79,7 +128,8 @@
 
 // Per-channel phase offset in DEGREES (-180..180], mirroring the stock phase
 // offsets (fractions of the period): red 0.25=90, green 0.833≈-60, blue
-// 0.667≈-120, cold/warm white aligned at 0.
+// 0.667≈-120, cold/warm white aligned at 0. The PWM engine normalizes these to a
+// [0,1) fraction of the channel's own period via ((deg mod 360) / 360).
 #define PWM_PHASE_CW 0.0f
 #define PWM_PHASE_RED 90.0f
 #define PWM_PHASE_GREEN -60.0f
