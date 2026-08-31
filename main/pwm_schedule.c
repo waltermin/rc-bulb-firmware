@@ -8,6 +8,13 @@
 #include <math.h>
 #include <stdlib.h>
 
+#if PWM_DEBUG_DUMP
+#include <stdio.h>
+// Print a [0,1] float as d.ddd without relying on %f (ESP8266 newlib-nano printf
+// omits float support): pass the value's permille through m/1000 and m%1000.
+#define PWM_DBG_MILLI(x) ((int)((x) * 1000.0f + 0.5f))
+#endif
+
 // One raw level-change before sorting/merging: at `offset` ticks, channel `chan`
 // takes level `level` (1 = high, 0 = low).
 typedef struct {
@@ -29,6 +36,18 @@ static inline float clamp01f(float x) {
 }
 
 bool pwm_compile(const pwm_chan_req_t *reqs, int nreqs, pwm_schedule_t *out) {
+#if PWM_DEBUG_DUMP
+    printf("==== PWM COMPILE (%d channels) ====\n", nreqs);
+    for (int i = 0; i < nreqs; i++) {
+        const int dm = PWM_DBG_MILLI(reqs[i].duty);
+        const int pm = PWM_DBG_MILLI(reqs[i].phase);
+        printf("  in  ch%d: duty=%d.%03d phase=%d.%03d period_log2=%u (%lu ticks)\n",
+               i, dm / 1000, dm % 1000, pm / 1000, pm % 1000,
+               (unsigned)reqs[i].period_log2,
+               (unsigned long)(1u << reqs[i].period_log2));
+    }
+#endif
+
     // 1. Find the longest active block (Nmax) among channels with duty > 0.
     uint8_t nmax = 0;
     bool any = false;
@@ -43,14 +62,27 @@ bool pwm_compile(const pwm_chan_req_t *reqs, int nreqs, pwm_schedule_t *out) {
         out->edges[0] = PWM_EDGE_MAKE(0, 0);
         out->count = 1;
         out->length_ticks = 1u << PWM_DEFAULT_PERIOD_LOG2;
+#if PWM_DEBUG_DUMP
+        printf("  (all channels off)\n"
+               "  edge table: 1 items, %lu ticks\n"
+               "    offset=0 on: (none)\n"
+               "==== END PWM COMPILE ====\n",
+               (unsigned long)out->length_ticks);
+#endif
         return true;
     }
     const uint32_t L = 1u << nmax;
 
     // 2. Build the t=0 state and the raw toggle list, channel by channel.
-    uint8_t  initial_state = 0;
-    toggle_t toggles[PWM_MAX_EDGES];
-    int      nt = 0;
+    // `toggles` is static, NOT on the stack: at the widest configured period range
+    // it is ~4 KB, which would overflow the few-KB caller task stacks — including
+    // the main task during pwm_output_init (a stack overflow there silently corrupts
+    // adjacent memory and crashes later, e.g. in Wi-Fi init). pwm_compile has a
+    // single producer at a time (init, then the controller task, then dfu2 — never
+    // concurrent and never from an ISR), so one shared static scratch buffer is safe.
+    static toggle_t toggles[PWM_MAX_EDGES];
+    uint8_t initial_state = 0;
+    int     nt = 0;
 
     for (int i = 0; i < nreqs; i++) {
         const float d = clamp01f(reqs[i].duty);
@@ -61,9 +93,15 @@ bool pwm_compile(const pwm_chan_req_t *reqs, int nreqs, pwm_schedule_t *out) {
 
         if (on_ticks >= block) {          // full on: constant high, no edges
             initial_state |= (uint8_t)(1u << i);
+#if PWM_DEBUG_DUMP
+            printf("  blk ch%d: FULL ON (%lu ticks)\n", i, (unsigned long)block);
+#endif
             continue;
         }
         if (on_ticks == 0) {              // rounds to off: stays low, no edges
+#if PWM_DEBUG_DUMP
+            printf("  blk ch%d: OFF (duty rounds to 0 ticks)\n", i);
+#endif
             continue;
         }
 
@@ -76,6 +114,12 @@ bool pwm_compile(const pwm_chan_req_t *reqs, int nreqs, pwm_schedule_t *out) {
         if (phase_at_zero < on_ticks) {
             initial_state |= (uint8_t)(1u << i);
         }
+#if PWM_DEBUG_DUMP
+        printf("  blk ch%d: on_time=%lu off_time=%lu ticks=%lu (block=%lu, on@t0=%d)\n",
+               i, (unsigned long)on_time, (unsigned long)fall_pos,
+               (unsigned long)on_ticks, (unsigned long)block,
+               (phase_at_zero < on_ticks) ? 1 : 0);
+#endif
 
         // Replicate the block across the schedule. Each repeat contributes a rise
         // (->high) at on_time and a fall (->low) at fall_pos; a toggle landing on
@@ -126,5 +170,22 @@ bool pwm_compile(const pwm_chan_req_t *reqs, int nreqs, pwm_schedule_t *out) {
 
     out->count = count;
     out->length_ticks = L;
+
+#if PWM_DEBUG_DUMP
+    printf("  edge table: %u items, %lu ticks\n",
+           (unsigned)out->count, (unsigned long)out->length_ticks);
+    for (int e = 0; e < out->count; e++) {
+        const uint32_t off = PWM_EDGE_OFFSET(out->edges[e]);
+        const uint8_t  st  = PWM_EDGE_STATE(out->edges[e]);
+        printf("    offset=%lu on:", (unsigned long)off);
+        bool none = true;
+        for (int ch = 0; ch < nreqs; ch++) {
+            if (st & (1u << ch)) { printf(" ch%d", ch); none = false; }
+        }
+        printf(none ? " (none)\n" : "\n");
+    }
+    printf("==== END PWM COMPILE ====\n");
+#endif
+
     return true;
 }

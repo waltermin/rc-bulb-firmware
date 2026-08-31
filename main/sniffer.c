@@ -117,6 +117,15 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;  // command handled (or not addressed to us)
     }
 
+    // RawLightUpdate (0x06): raw duties + per-channel periods, applied without the
+    // curve/max-power cap. Distinct controller path from the curve-mapped colors.
+    if (r.has_raw_entry) {
+        controller_notify_raw_entry(r.r, r.g, r.b, r.ww, r.cw,
+                                    r.period_r, r.period_g, r.period_b,
+                                    r.period_ww, r.period_cw);
+        return;
+    }
+
     // Color-bearing packets (0x02, 0x03; legacy 0x01 if enabled). Any legacy
     // dfu_requested field is ignored (see above).
     if (r.has_entry) {

@@ -89,24 +89,43 @@
 // state byte supports up to 8 channels; this is the real hardware maximum.
 #define PWM_MAX_CHANNELS 5
 
-// Near/far edge split: if the next edge is within this many ticks, the ISR busy-
-// waits (CCOUNT spin) and applies it inline instead of paying a fresh interrupt.
-// ~25 ticks = 5 us, comfortably above interrupt entry/exit + re-arm overhead.
-#define PWM_BUSYWAIT_TICKS 25
+// Jitter control. The ISR arms the FRC1 one-shot to fire PWM_AHEAD_TICKS ticks
+// BEFORE the next edge (a RELATIVE, schedule-derived delay — always bounded), then
+// busy-waits a short, hard-capped spin on the CPU cycle counter (CCOUNT) to toggle
+// the GPIO at the edge's exact time. The spin absorbs interrupt-entry latency: as
+// long as latency < PWM_AHEAD_TICKS the edge lands on time, so duty cycles stay
+// precise and the LEDs don't flicker. Bigger absorbs more latency but spins longer
+// (up to ~PWM_AHEAD_TICKS per edge); 40 ticks = 8 us matches the stock SDK PWM's
+// margin. Lower it if CPU-bound with low latency; raise it if flicker persists.
+#define PWM_AHEAD_TICKS 75
 
-// Cap on how many near edges the ISR may coalesce (busy-wait through) in a single
-// invocation. Bounds worst-case in-ISR dwell — and thus how long interrupts stay
-// masked — to ~PWM_MAX_COALESCE * PWM_BUSYWAIT_TICKS ticks even for a pathological
-// schedule that packs edges tightly; past the cap it arms the timer instead.
+// Hard ceiling on a single spin, as a multiple of the ahead window. The spin should
+// never need more than PWM_AHEAD_TICKS; this is a pure safety valve so a bad target
+// can never hang the CPU — past it the ISR gives up spinning and applies the edge.
+#define PWM_SPIN_CAP_TICKS (PWM_AHEAD_TICKS * 2)
+
+// The ISR spins through ("coalesces") edges closer together than the arm-ahead
+// window instead of taking a fresh interrupt for each. This caps how long one ISR
+// invocation can hold the CPU (worst-case dwell ~ PWM_MAX_COALESCE * PWM_AHEAD_TICKS
+// ticks) so a tightly-packed schedule can't starve Wi-Fi; past the cap it arms the
+// timer and returns even for a near edge.
 #define PWM_MAX_COALESCE 8
 
-// CPU cycles per 200 ns tick, for the CCOUNT busy-wait. 80 MHz -> 16, 160 -> 32.
-#ifdef CONFIG_ESP8266_DEFAULT_CPU_FREQ_160
-#define PWM_CPU_MHZ 160
-#else
-#define PWM_CPU_MHZ 80
+// Debug: when 1, pwm_compile() prints (via printf, to the console UART) a full
+// dump of every schedule it builds — the per-channel inputs (duty, phase,
+// period_log2), each active block's on_time/off_time/tick count, and the whole
+// compiled edge table (offset + which channels are on per entry). Verbose and on
+// the color hot path, so keep it 0 except when bench-debugging the PWM math.
+// Guarded so a build can force it on with -DPWM_DEBUG_DUMP=1 without editing here.
+#ifndef PWM_DEBUG_DUMP
+#define PWM_DEBUG_DUMP 1
 #endif
-#define PWM_CYCLES_PER_TICK ((PWM_CPU_MHZ * PWM_TICK_NS) / 1000)
+
+// The CPU cycles per 200 ns tick used to convert schedule ticks <-> the CCOUNT
+// timebase (16 at 80 MHz, 32 at 160 MHz) is detected at RUNTIME in pwm_output_init
+// via esp_clk_cpu_freq(), not a compile-time macro: the SDK's CONFIG_* CPU-freq
+// symbols are not visible in this SDK-free header, and the actual default here is
+// 160 MHz — guessing 80 desynchronizes the timer and makes the LEDs strobe.
 
 // Fraction of full scale the LEDs are allowed to reach (stock caps at 80%).
 #define PWM_MAX_POWER 0.80f

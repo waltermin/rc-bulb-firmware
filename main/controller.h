@@ -22,6 +22,16 @@ void controller_start(void);
 // drops if the queue is momentarily full.
 void controller_notify_entry(float r, float g, float b, float ww, float cw);
 
+// Post a RAW color addressed to us (0x06 RawLightUpdate): duty cycles in [0,1]
+// applied WITHOUT the gamma/perceptual curve or max-power cap (so they can
+// overdrive), each channel with its own PWM period as a log2(ticks) exponent
+// (clamped to the firmware range by the PWM layer). Resets the fallback timer like
+// a normal color. Safe from the RX callback; non-blocking; drops if the queue is
+// full. Color and period args are both in the fixed order r, g, b, ww, cw.
+void controller_notify_raw_entry(float r, float g, float b, float ww, float cw,
+                                 uint8_t period_r, uint8_t period_g, uint8_t period_b,
+                                 uint8_t period_ww, uint8_t period_cw);
+
 // Post a DFU2 (pull-based OTA) request with the parameters copied out of a
 // Dfu2Request beacon. Applied on the controller task, which hands off to the DFU2
 // task and stands down. Safe to call from the promiscuous RX callback context;

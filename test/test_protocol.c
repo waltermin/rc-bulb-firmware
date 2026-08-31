@@ -102,6 +102,19 @@ static size_t wrap_beacon(uint8_t *out, const uint8_t *pkt, size_t pkt_len) {
     return n;
 }
 
+// Build a beacon carrying a RawLightUpdate (0x06): five float duties followed by
+// five period bytes, both in the channel order r,g,b,ww,cw.
+static size_t build_raw_frame(uint8_t *out, uint8_t bulb_id, const float duties[5],
+                              const uint8_t periods[5]) {
+    uint8_t pkt[2 + 5 * 4 + 5];
+    size_t m = 0;
+    pkt[m++] = PROTO_TAG_RAW_LIGHT_UPDATE;
+    pkt[m++] = bulb_id;
+    for (int i = 0; i < 5; i++) { memcpy(&pkt[m], &duties[i], 4); m += 4; }
+    for (int i = 0; i < 5; i++) pkt[m++] = periods[i];
+    return wrap_beacon(out, pkt, m);
+}
+
 static void put_u32_le(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
@@ -330,6 +343,59 @@ int main(void) {
         buf[37] -= 1;  // IE length field (offset 36 tag, 37 length)
         bulb_parse_result_t r = protocol_parse_beacon(buf, len - 1, MY_ID);
         printf("truncated precise:\n");
+        CHECK(!r.valid);
+    }
+
+    // ---- RawLightUpdate (0x06) --------------------------------------------
+    // --- raw update addressed to us: duties pass through, periods unpacked ---
+    {
+        float duties[5] = {0.9f, 0.1f, 0.0f, 0.5f, 1.0f};      // r,g,b,ww,cw
+        uint8_t pw[5] = {10, 11, 12, 13, 14};                  // r,g,b,ww,cw
+        size_t len = build_raw_frame(buf, MY_ID, duties, pw);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("raw for us:\n");
+        CHECK(r.valid);
+        CHECK(r.has_raw_entry);
+        CHECK(!r.has_entry);            // raw is a distinct path from curve-mapped color
+        CHECK(FEQ(r.r, 0.9f) && FEQ(r.g, 0.1f) && FEQ(r.b, 0.0f) &&
+              FEQ(r.ww, 0.5f) && FEQ(r.cw, 1.0f));
+        // periods map by name, same channel order as the colors (r,g,b,ww,cw)
+        CHECK(r.period_r == 10 && r.period_g == 11 && r.period_b == 12);
+        CHECK(r.period_ww == 13 && r.period_cw == 14);
+    }
+
+    // --- raw update addressed to another bulb: valid, but nothing for us ---
+    {
+        float duties[5] = {1, 1, 1, 1, 1};
+        uint8_t pw[5] = {12, 12, 12, 12, 12};
+        size_t len = build_raw_frame(buf, 99, duties, pw);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("raw for another id:\n");
+        CHECK(r.valid);
+        CHECK(!r.has_raw_entry);
+        CHECK(!r.has_entry);
+    }
+
+    // --- raw duties are clamped to [0,1] (but NOT capped at max power) ---
+    {
+        float duties[5] = {2.0f, -1.0f, 0.5f, 100.0f, -0.001f};
+        uint8_t pw[5] = {12, 12, 12, 12, 12};
+        size_t len = build_raw_frame(buf, MY_ID, duties, pw);
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+        printf("raw clamp:\n");
+        CHECK(r.valid && r.has_raw_entry);
+        CHECK(FEQ(r.r, 1.0f) && FEQ(r.g, 0.0f) && FEQ(r.b, 0.5f) &&
+              FEQ(r.ww, 1.0f) && FEQ(r.cw, 0.0f));
+    }
+
+    // --- truncated RawLightUpdate (one byte short) is rejected ---
+    {
+        float duties[5] = {1, 0, 0, 0, 0};
+        uint8_t pw[5] = {12, 12, 12, 12, 12};
+        size_t len = build_raw_frame(buf, MY_ID, duties, pw);
+        buf[37] -= 1;  // shrink IE length to match the dropped final byte
+        bulb_parse_result_t r = protocol_parse_beacon(buf, len - 1, MY_ID);
+        printf("truncated raw:\n");
         CHECK(!r.valid);
     }
 

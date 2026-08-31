@@ -196,3 +196,24 @@ advertised/served build id, the transport SHA-256, and lets the SDK validate the
 on-flash image. Only then does it flip the (dual-copy, atomic) boot pointer and
 reboot into the new build. Any failure reboots into the untouched current
 firmware, which will retry on the next Dfu2Request it hears.
+
+## `0x06` - RawLightUpdate
+
+RawLightUpdate pushes raw, unprocessed duty cycles to a given bulb. The only thing that the firmware does is clamp between 0 and 1. Beware: this means it's possible to overdrive the bulb if you send values above 0.8!
+Additionally, desired PWM period length as log2(ticks) is also available per channel, clamped to the minimum and maximum that the firmware supports.
+
+```
+struct PreciseLightUpdate {
+    bulb_id: u8,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
+    color_ww: f32,
+    color_cw: f32,
+    period_r: u8,
+    period_g: u8,
+    period_b: u8,
+    period_ww: u8,
+    period_cw: u8,
+}
+```

@@ -34,6 +34,13 @@ void pwm_output_set(float r, float g, float b, float ww, float cw);
 // Apply the compile-time / NVS DEFAULT_* color. Idempotent.
 void pwm_output_set_default(void);
 
+// Set all five channels from RAW duty cycles: clamped to [0.0, 1.0] ONLY — no
+// gamma/perceptual curve and no max-power cap, so values above 0.8 WILL overdrive
+// the LEDs. Each channel also carries its own PWM period as a log2(ticks) exponent
+// (clamped to the firmware's supported range). Both arrays are indexed by logical
+// color in the fixed order R, G, B, WW, CW. Backs the 0x06 RawLightUpdate path.
+void pwm_output_set_raw(const float duties[5], const uint8_t period_log2[5]);
+
 #ifdef __cplusplus
 }
 #endif

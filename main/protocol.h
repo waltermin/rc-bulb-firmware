@@ -86,9 +86,22 @@
 //   vendor-IE body must stay <= PROTO_DFU2_MAX_BODY bytes (ESP8266 promiscuous RX
 //   drops frames >= 128 bytes total).
 //
+//   0x06 RawLightUpdate — one bulb, float32 RAW duties + a per-channel PWM period.
+//        Duties are clamped to [0,1] but NOT curve-mapped or power-capped (so a
+//        value > 0.8 overdrives); each channel also carries its PWM period as a
+//        log2(ticks) exponent (clamped to the firmware range by the PWM layer):
+//     struct RawLightUpdate {
+//       u8  packet_tag;    // 0x06
+//       u8  bulb_id;
+//       f32 r, g, b, ww, cw;   // raw duties, little-endian
+//       u8  period_r, period_g, period_b, period_ww, period_cw;  // same order as colors
+//     }
+//     A testing/diagnostic path for the per-channel-rate PWM engine.
+//
 // Color-bearing packets (0x01/0x02/0x03) resolve to "no update for me" or a
-// normalized [0,1] color; commands (0x04) resolve to a DFU or config request.
-// protocol_parse_beacon() hides the wire encoding behind bulb_parse_result_t.
+// normalized [0,1] color; 0x06 resolves to a raw color + per-channel periods;
+// commands (0x04) resolve to a DFU or config request. protocol_parse_beacon()
+// hides the wire encoding behind bulb_parse_result_t.
 
 #ifndef BULB_PROTOCOL_H
 #define BULB_PROTOCOL_H
@@ -122,6 +135,7 @@ extern "C" {
 #define PROTO_TAG_LIGHT_UPDATE_V2 0x03u       // u8-per-channel table, no DFU
 #define PROTO_TAG_BULB_COMMAND 0x04u          // remote management (config / DFU)
 #define PROTO_TAG_DFU2_REQUEST 0x05u          // pull-based OTA advertisement
+#define PROTO_TAG_RAW_LIGHT_UPDATE 0x06u      // single bulb, f32 raw duties + periods
 #define PROTO_TAG_SIZE 1u                     // width of the packet tag itself
 
 // Whether the deprecated 0x01 LightUpdate is still processed. New firmware
@@ -142,6 +156,11 @@ extern "C" {
 // PreciseLightUpdate total size: packet_tag + bulb_id + 5 * f32.
 #define PROTO_PRECISE_CHANNELS 5u
 #define PROTO_PRECISE_SIZE (PROTO_TAG_SIZE + 1u + PROTO_PRECISE_CHANNELS * 4u)  // 22
+
+// RawLightUpdate total size: packet_tag + bulb_id + 5 * f32 duty + 5 * u8 period.
+#define PROTO_RAW_CHANNELS 5u
+#define PROTO_RAW_SIZE \
+    (PROTO_TAG_SIZE + 1u + PROTO_RAW_CHANNELS * 4u + PROTO_RAW_CHANNELS)  // 27
 
 #define PROTO_CTRL_FLAG_DFU 0x01u       // control_flags value that requests DFU mode
 
@@ -172,11 +191,20 @@ extern "C" {
 typedef struct {
     bool valid;          // frame is a well-formed packet for our protocol
     bool dfu_requested;  // DFU addressed to my_id (0x01 control field, or 0x04 EnterDfuMode)
-    bool has_entry;      // a color addressed to my_id was present
-    // Color to apply, normalized to [0.0, 1.0], only meaningful when has_entry.
-    // LightUpdate/V2 u8 channels are scaled by 1/255; PreciseLightUpdate's f32
-    // channels are passed through (clamped to [0,1], NaN treated as 0).
+    bool has_entry;      // a (curve-mapped) color addressed to my_id was present
+    // Color to apply, normalized to [0.0, 1.0], meaningful when has_entry or
+    // has_raw_entry. LightUpdate/V2 u8 channels are scaled by 1/255;
+    // PreciseLightUpdate/RawLightUpdate f32 channels are passed through (clamped
+    // to [0,1], NaN treated as 0).
     float r, g, b, ww, cw;
+
+    // RawLightUpdate (0x06): raw duties in r..cw applied WITHOUT the gamma/
+    // perceptual curve or the max-power cap (so >0.8 overdrives), plus a per-
+    // channel PWM period as a log2(ticks) exponent (the PWM layer clamps it to
+    // the supported range). Set only for a 0x06 addressed to my_id; mutually
+    // exclusive with has_entry. Period fields are named to match the color fields.
+    bool    has_raw_entry;
+    uint8_t period_r, period_g, period_b, period_ww, period_cw;
 
     // BulbCommand (0x04) fields. is_command is set for any well-formed command
     // regardless of addressing, and seq is then valid — the caller tracks the

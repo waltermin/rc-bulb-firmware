@@ -219,6 +219,43 @@ static bulb_parse_result_t parse_precise_light_update(const uint8_t *pkt, size_t
     return out;
 }
 
+// 0x06 RawLightUpdate: [tag, bulb_id, f32 r,g,b,ww,cw, u8 period_r,g,b,ww,cw].
+// Like PreciseLightUpdate but the duties are RAW — clamped to [0,1] here, and the
+// caller applies them WITHOUT the curve/max-power (so they can overdrive) — plus a
+// per-channel PWM period (log2 ticks), clamped to the firmware range downstream.
+// Periods are in the same channel order as the colors (r,g,b,ww,cw).
+static bulb_parse_result_t parse_raw_light_update(const uint8_t *pkt, size_t pkt_len,
+                                                  uint8_t my_id) {
+    if (pkt_len < PROTO_RAW_SIZE) {
+        return INVALID;
+    }
+
+    bulb_parse_result_t out = {
+        .valid = true,
+        .dfu_requested = false,
+        .has_entry = false,
+        .r = 0, .g = 0, .b = 0, .ww = 0, .cw = 0,
+    };
+
+    if (pkt[1] == my_id) {
+        const uint8_t *c = pkt + PROTO_TAG_SIZE + 1;  // first duty float
+        out.has_raw_entry = true;
+        out.r  = clamp01(read_f32_le(c +  0));
+        out.g  = clamp01(read_f32_le(c +  4));
+        out.b  = clamp01(read_f32_le(c +  8));
+        out.ww = clamp01(read_f32_le(c + 12));
+        out.cw = clamp01(read_f32_le(c + 16));
+        const uint8_t *p = c + PROTO_RAW_CHANNELS * 4u;  // period bytes (r,g,b,ww,cw)
+        out.period_r  = p[0];
+        out.period_g  = p[1];
+        out.period_b  = p[2];
+        out.period_ww = p[3];
+        out.period_cw = p[4];
+    }
+
+    return out;
+}
+
 // 0x05 Dfu2Request: [tag, fmt, start, bounds, ip(4), port(u16), build_id(len+n),
 // ssid(len+n), pass(len+n)]. Sets dfu2_requested only when my_id is in
 // [start, start+bounds]; every field is length-checked against pkt_len before it
@@ -346,6 +383,8 @@ bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len
             return parse_bulb_command(pkt, pkt_len, my_id);
         case PROTO_TAG_DFU2_REQUEST:
             return parse_dfu2_request(pkt, pkt_len, my_id);
+        case PROTO_TAG_RAW_LIGHT_UPDATE:
+            return parse_raw_light_update(pkt, pkt_len, my_id);
         default:
             return INVALID;  // unknown or disabled packet tag
     }

@@ -6,6 +6,9 @@ Packet types are selected by the packet tag (the first payload byte after the OU
     0x02 PreciseLightUpdate --precise id:r,g,b,ww,cw (f32 channels, 0.0..1.0)
     0x05 Dfu2Request        --dfu2 RANGE SSID PASS IP PORT BUILD_ID_HEX
                             (pull-based OTA advert; RANGE is 'a-b' or a single id)
+    0x06 RawLightUpdate     --raw id:r,g,b,ww,cw:pr,pg,pb,pww,pcw
+                            (raw f32 duties, clamp-only/no curve/can overdrive,
+                             plus per-channel PWM period as log2(ticks))
 
 Requires a Wi-Fi interface in MONITOR mode on the same channel the bulb sniffs
 (WIFI_CHANNEL in config.h, default 1) and root privileges. Uses scapy.
@@ -25,6 +28,10 @@ Examples:
 
     # Drive bulb id 7 to full-red with a PreciseLightUpdate (float channels):
     sudo python3 send_update.py -i wlan0mon --precise 7:1.0,0,0,0,0
+
+    # Push RAW duties to bulb id 7 (no curve/cap) with per-channel PWM periods
+    # (log2 ticks; here all ~1.2 kHz = 2^12): duties then periods, r,g,b,ww,cw:
+    sudo python3 send_update.py -i wlan0mon --raw 7:0.5,0,0,0,0:12,12,12,12,12
 
     # Request that bulb id 7 enter DFU mode (legacy push DFU):
     sudo python3 send_update.py -i wlan0mon --dfu 7 --count 5
@@ -47,6 +54,7 @@ VENDOR_OUI = bytes([0x52, 0x43, 0x68])
 TAG_LIGHT_UPDATE = 0x01
 TAG_PRECISE_LIGHT_UPDATE = 0x02
 TAG_DFU2_REQUEST = 0x05
+TAG_RAW_LIGHT_UPDATE = 0x06
 CTRL_FLAG_DFU = 0x01
 DFU2_FMT_VERSION = 0x01
 DFU2_BUILD_ID_LEN = 8
@@ -78,6 +86,30 @@ def parse_precise(spec):
     if not 0 <= bulb_id <= 255:
         raise ValueError(f"bulb id out of range in '{spec}'")
     return bytes([TAG_PRECISE_LIGHT_UPDATE, bulb_id]) + struct.pack("<5f", *vals)
+
+
+def parse_raw(spec):
+    """'id:r,g,b,ww,cw:pr,pg,pb,pww,pcw' -> RawLightUpdate body bytes (tag..periods).
+
+    Duties are floats (clamp-only on the bulb, so values >0.8 overdrive); periods
+    are per-channel PWM periods as log2(ticks) integers. Both are in the channel
+    order r,g,b,ww,cw, matching the wire format.
+    """
+    parts = spec.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"raw '{spec}' needs 'id:duties:periods'")
+    bulb_id = int(parts[0])
+    duties = [float(x) for x in parts[1].split(",")]
+    periods = [int(x) for x in parts[2].split(",")]
+    if len(duties) != 5 or len(periods) != 5:
+        raise ValueError(f"raw '{spec}' needs 5 duties and 5 periods (r,g,b,ww,cw)")
+    if not 0 <= bulb_id <= 255:
+        raise ValueError(f"bulb id out of range in '{spec}'")
+    for p in periods:
+        if not 0 <= p <= 255:
+            raise ValueError(f"period out of range (0..255) in '{spec}'")
+    return (bytes([TAG_RAW_LIGHT_UPDATE, bulb_id])
+            + struct.pack("<5f", *duties) + bytes(periods))
 
 
 def build_frame_from_body(body):
@@ -147,6 +179,9 @@ def main():
                     help="LightUpdate (0x01) bulb entry 'id:r,g,b,ww,cw', u8 (repeatable)")
     ap.add_argument("--precise", default=None,
                     help="PreciseLightUpdate (0x02) 'id:r,g,b,ww,cw', floats 0.0..1.0")
+    ap.add_argument("--raw", default=None,
+                    help="RawLightUpdate (0x06) 'id:r,g,b,ww,cw:pr,pg,pb,pww,pcw' "
+                         "(raw duties, no curve/cap; periods as log2 ticks)")
     ap.add_argument("--dfu", type=int, default=None,
                     help="request DFU mode for this bulb id (LightUpdate control field)")
     ap.add_argument("--dfu2", nargs=6, default=None,
@@ -161,6 +196,9 @@ def main():
         ap.error("--precise cannot be combined with --entry or --dfu")
     if args.dfu2 is not None and (args.entry or args.dfu is not None or args.precise is not None):
         ap.error("--dfu2 cannot be combined with --entry/--dfu/--precise")
+    if args.raw is not None and (args.entry or args.dfu is not None
+                                 or args.precise is not None or args.dfu2 is not None):
+        ap.error("--raw cannot be combined with --entry/--dfu/--precise/--dfu2")
 
     if args.dfu2 is not None:
         try:
@@ -168,6 +206,12 @@ def main():
         except ValueError as e:
             ap.error(str(e))
         desc = f"dfu2 range={args.dfu2[0]} build={args.dfu2[5]}"
+    elif args.raw is not None:
+        try:
+            frame = build_frame_from_body(parse_raw(args.raw))
+        except ValueError as e:
+            ap.error(str(e))
+        desc = f"raw={args.raw}"
     elif args.precise is not None:
         frame = build_frame_from_body(parse_precise(args.precise))
         desc = f"precise={args.precise}"

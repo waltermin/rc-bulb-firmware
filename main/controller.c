@@ -24,6 +24,7 @@ typedef enum {
     MSG_DFU2 = 1,
     MSG_SET_CONFIG = 2,
     MSG_REBOOT = 3,
+    MSG_APPLY_RAW = 4,
 } ctrl_msg_type_t;
 
 typedef struct {
@@ -32,6 +33,10 @@ typedef struct {
         struct {
             float r, g, b, ww, cw;  // normalized [0,1] duty cycles (MSG_APPLY)
         } color;
+        struct {
+            float   r, g, b, ww, cw;         // raw duties, clamp-only (MSG_APPLY_RAW)
+            uint8_t pr, pg, pb, pww, pcw;    // per-channel PWM period, log2(ticks)
+        } raw;                      // MSG_APPLY_RAW
         struct {
             uint16_t key;
             uint8_t  len;
@@ -103,6 +108,16 @@ static void controller_task(void *arg) {
                 if (err == ESP_OK && msg.u.cfg.key == CFG_TAG_WIFI_CHANNEL) {
                     sniffer_apply_channel(bulb_config_get_u8(CFG_WIFI_CHANNEL));
                 }
+            } else if (msg.type == MSG_APPLY_RAW) {
+                // MSG_APPLY_RAW — raw duties (clamp-only, no curve/cap) plus a
+                // per-channel PWM period. Arrays are in COLOR_* order R,G,B,WW,CW.
+                const float duties[5] = {msg.u.raw.r, msg.u.raw.g, msg.u.raw.b,
+                                         msg.u.raw.ww, msg.u.raw.cw};
+                const uint8_t periods[5] = {msg.u.raw.pr, msg.u.raw.pg, msg.u.raw.pb,
+                                            msg.u.raw.pww, msg.u.raw.pcw};
+                pwm_output_set_raw(duties, periods);
+                last_seen = xTaskGetTickCount();
+                at_default = false;
             } else {
                 // MSG_APPLY — colors arrive already normalized to [0,1] by the parser.
                 pwm_output_set(msg.u.color.r, msg.u.color.g, msg.u.color.b,
@@ -140,6 +155,19 @@ void controller_notify_entry(float r, float g, float b, float ww, float cw) {
     }
     ctrl_msg_t msg = {.type = MSG_APPLY,
                       .u.color = {.r = r, .g = g, .b = b, .ww = ww, .cw = cw}};
+    // Drop if full: a newer beacon will arrive shortly anyway.
+    xQueueSend(s_queue, &msg, 0);
+}
+
+void controller_notify_raw_entry(float r, float g, float b, float ww, float cw,
+                                 uint8_t pr, uint8_t pg, uint8_t pb,
+                                 uint8_t pww, uint8_t pcw) {
+    if (s_queue == NULL) {
+        return;
+    }
+    ctrl_msg_t msg = {.type = MSG_APPLY_RAW,
+                      .u.raw = {.r = r, .g = g, .b = b, .ww = ww, .cw = cw,
+                                .pr = pr, .pg = pg, .pb = pb, .pww = pww, .pcw = pcw}};
     // Drop if full: a newer beacon will arrive shortly anyway.
     xQueueSend(s_queue, &msg, 0);
 }

@@ -17,6 +17,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,6 +25,7 @@
 #include "driver/hw_timer.h"
 #include "driver/gpio.h"
 #include "driver/soc.h"            // soc_get_ccount()
+#include "esp_clk.h"               // esp_clk_cpu_freq()
 #include "esp8266/gpio_struct.h"   // GPIO.out_w1ts / out_w1tc
 #include "esp8266/timer_struct.h"  // frc1
 #include "esp_attr.h"              // IRAM_ATTR / DRAM_ATTR
@@ -154,31 +156,72 @@ static volatile bool     s_update_pending;  // inactive buffer holds a newer sch
 static volatile uint16_t s_idx;             // next entry the ISR will apply
 static volatile bool     s_running;         // timer armed / engine started
 
+// Absolute CPU-cycle (CCOUNT) time at which the edge the ISR is about to apply
+// (s_idx) should fire. Advanced by each edge's exact tick gap so the frequency
+// stays locked to the CPU clock, but re-anchored to "now" whenever an edge is
+// applied late (bounding it to within one edge of real time in both directions —
+// no accumulating drift, no runaway). Only the ISR writes it after startup
+// (engine_first_arm seeds it), so no lock.
+static uint32_t s_target;
+
+// log2(CPU cycles per 200 ns tick): 4 at 80 MHz, 5 at 160 MHz. Detected once at
+// init from the real CPU frequency (see pwm_output_init). Used as a shift so the
+// tick<->cycle conversion in the ISR needs no divide (the LX106 has none, and a
+// libgcc divide is flash-resident — unsafe in the OTA-safe ISR).
+static uint32_t s_cyc_shift;
+
 // ---- FRC1 ISR ---------------------------------------------------------------
-// Walks the active edge table. Per edge: translate the state byte to a single
-// set + single clear GPIO store, then either busy-wait a near edge (CCOUNT) and
-// apply it inline, or arm a one-shot for a far edge and return. At the wrap it
-// swaps in a pending schedule. Touches only RAM + GPIO/FRC1 regs — OTA-safe.
+// Applies each edge, placing the GPIO toggle at its exact time to keep PWM jitter-
+// free, but bounded on every axis so it can never run away:
+//   * ARM is RELATIVE and schedule-derived: gap - PWM_AHEAD_TICKS ticks (gap is the
+//     tick delta to the next edge). Always in [1, length]; never wall-clock-derived,
+//     so never 0 and never huge. This is what makes the timer pacing robust.
+//   * SPIN is short and HARD-CAPPED: we fire ~PWM_AHEAD_TICKS early and spin on
+//     CCOUNT to the edge's exact target, but bail after PWM_SPIN_CAP_TICKS so the
+//     ISR can never hold the CPU for long (no watchdog).
+//   * TARGET is re-anchored: it advances by exact tick gaps (locking the frequency
+//     to the CPU clock), but snaps to "now" if an edge is applied late by more than
+//     the spin window — bounding it to within one edge of real time, both ways.
+// Touches only RAM + GPIO/FRC1 regs + CCOUNT — OTA-safe.
 static void IRAM_ATTR pwm_isr(void *arg) {
     (void)arg;
     const pwm_schedule_t *sch = &s_sched[s_active];
     uint16_t idx = s_idx;
-    int coalesced = 0;  // near edges handled inline this invocation (dwell guard)
+    int coalesced = 0;  // edges handled inline this invocation (dwell guard)
+
+    const int32_t ahead = (int32_t)(PWM_AHEAD_TICKS << s_cyc_shift);
+    const uint32_t spin_cap = (uint32_t)(PWM_SPIN_CAP_TICKS << s_cyc_shift);
 
     for (;;) {
-        const pwm_edge_t e = sch->edges[idx];
-        const uint8_t st = PWM_EDGE_STATE(e);
+        // Spin to this edge's exact target, then toggle. We were armed to fire a
+        // little early, so the spin is short; a hard cap guarantees it can't hang if
+        // the target is ever bad, and if we arrived late the test is already true so
+        // we apply immediately.
+        const uint32_t spin_start = soc_get_ccount();
+        while ((int32_t)(soc_get_ccount() - s_target) < 0) {
+            if ((soc_get_ccount() - spin_start) >= spin_cap) break;  // safety valve
+        }
+
+        const uint8_t st = PWM_EDGE_STATE(sch->edges[idx]);
         GPIO.out_w1ts = s_set_lut[st];
         GPIO.out_w1tc = s_clr_lut[st];
 
-        const uint32_t cur_off = PWM_EDGE_OFFSET(e);
+        // Re-anchor: if this edge was applied late by more than the spin window (the
+        // ISR was starved, e.g. by phy_init), catch the timeline up to now so the
+        // lateness doesn't propagate. Normal small overruns are left alone so the
+        // target stays exactly on the tick grid (frequency locked).
+        if ((int32_t)(soc_get_ccount() - s_target) > ahead) {
+            s_target = soc_get_ccount();
+        }
+
+        // Gap (tick delta) to the next edge, and advance the absolute target by it.
+        const uint32_t cur_off = PWM_EDGE_OFFSET(sch->edges[idx]);
         uint16_t next_idx = idx + 1;
         uint32_t gap;
         if (next_idx < sch->count) {
             gap = PWM_EDGE_OFFSET(sch->edges[next_idx]) - cur_off;
         } else {
-            // End of cycle: fast-forward to the wrap, then start over at entry 0,
-            // swapping to a freshly compiled schedule if one is waiting.
+            // Cycle wrap: swap in a freshly compiled schedule if one is waiting.
             gap = sch->length_ticks - cur_off;
             next_idx = 0;
             if (s_update_pending) {
@@ -188,23 +231,19 @@ static void IRAM_ATTR pwm_isr(void *arg) {
             }
         }
         idx = next_idx;
+        s_target += gap << s_cyc_shift;
 
-        if (gap <= PWM_BUSYWAIT_TICKS && coalesced < PWM_MAX_COALESCE) {
-            // Near edge: spin rather than pay another interrupt entry/exit. The
-            // coalesce cap bounds how long we can hold the CPU with interrupts
-            // masked; past it we fall through and arm the timer even for a small
-            // gap, letting other interrupts run.
+        // If the next edge is within the arm-ahead window, spin through it inline
+        // (bounded by the coalesce cap) rather than take another interrupt; else arm
+        // the one-shot to fire ~PWM_AHEAD_TICKS before it. The arm is always a sane
+        // relative delay. The trampoline already cleared en; load.data then en=1
+        // loads the new count and counts down.
+        if (gap <= PWM_AHEAD_TICKS && coalesced < PWM_MAX_COALESCE) {
             coalesced++;
-            const uint32_t start = soc_get_ccount();
-            const uint32_t cycles = gap * PWM_CYCLES_PER_TICK;
-            while ((soc_get_ccount() - start) < cycles) { /* spin */ }
-            continue;  // apply sch->edges[idx] inline
+            continue;
         }
-
-        // Far edge: re-arm the one-shot. The trampoline already cleared en; writing
-        // load.data then en=1 loads the new count and counts down.
         s_idx = idx;
-        frc1.load.data = gap;
+        frc1.load.data = (gap > PWM_AHEAD_TICKS) ? (gap - PWM_AHEAD_TICKS) : 1u;
         frc1.ctrl.en = 1;
         return;
     }
@@ -241,39 +280,68 @@ static void build_reqs(color5_t duties, pwm_chan_req_t reqs[PWM_CHANNELS]) {
     }
 }
 
-// Apply the t=0 entry of the active schedule and arm the timer for the next edge.
-// Called only from a critical section while the timer is idle (init).
+// Apply the t=0 entry of the active schedule now, seed the absolute target for the
+// next edge, and arm the timer (relative) to fire ~PWM_AHEAD_TICKS before it. Called
+// only from a critical section while the timer is idle (init).
 static void engine_first_arm(void) {
     const pwm_schedule_t *sch = &s_sched[s_active];
+    const uint32_t now = soc_get_ccount();  // this edge (entry 0) is applied now
     const uint8_t st0 = PWM_EDGE_STATE(sch->edges[0]);
     GPIO.out_w1ts = s_set_lut[st0];
     GPIO.out_w1tc = s_clr_lut[st0];
 
+    // Gap (tick delta) to the next edge: entry 1, or the wrap for a static schedule.
     uint32_t gap;
     if (sch->count > 1) {
-        gap = PWM_EDGE_OFFSET(sch->edges[1]);  // entry0 offset is 0
+        gap = PWM_EDGE_OFFSET(sch->edges[1]);  // entry 0 offset is 0
         s_idx = 1;
     } else {
-        gap = sch->length_ticks;               // static schedule: fire at wrap
+        gap = sch->length_ticks;  // static: next event is the wrap
         s_idx = 0;
     }
-    frc1.load.data = gap;
+    s_target = now + (gap << s_cyc_shift);
+    frc1.load.data = (gap > PWM_AHEAD_TICKS) ? (gap - PWM_AHEAD_TICKS) : 1u;
     frc1.ctrl.en = 1;
     s_running = true;
 }
 
-// Compile the duties into a schedule and publish it to the ISR. Single producer
-// (controller/dfu2 task, or init): while we compile, s_update_pending is false, so
-// the ISR never swaps s_active out from under us and the inactive buffer is stable.
-static void publish_duties(color5_t duties) {
-    pwm_chan_req_t reqs[PWM_CHANNELS];
-    build_reqs(duties, reqs);
+// The per-channel request set most recently compiled into a schedule — i.e. what
+// the engine is currently playing (or is staged to play at the next wrap). Used to
+// skip redundant recompiles when the same duties/periods arrive again.
+static pwm_chan_req_t s_last_reqs[PWM_CHANNELS];
+static bool           s_have_last_reqs;
+
+static bool reqs_equal(const pwm_chan_req_t *a, const pwm_chan_req_t *b) {
+    for (int i = 0; i < PWM_CHANNELS; i++) {
+        // Duties/phases are recomputed deterministically from the same inputs, so
+        // an identical configuration yields bit-identical floats (no NaNs reach
+        // here — the curve/clamp map them to 0), making exact compare correct.
+        if (a[i].duty != b[i].duty || a[i].phase != b[i].phase ||
+            a[i].period_log2 != b[i].period_log2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Compile per-channel requests into a schedule and publish it to the ISR. Single
+// producer (controller/dfu2 task, or init): while we compile, s_update_pending is
+// false, so the ISR never swaps s_active out from under us and the inactive buffer
+// is stable.
+static void publish_reqs(const pwm_chan_req_t *reqs) {
+    // Skip the (heavy) recompile + republish when the requested duty/phase/period
+    // is identical to what the engine is already playing or has staged.
+    if (s_have_last_reqs && reqs_equal(reqs, s_last_reqs)) {
+        return;
+    }
 
     const uint8_t target = s_running ? (uint8_t)(s_active ^ 1) : s_active;
     if (!pwm_compile(reqs, PWM_CHANNELS, &s_sched[target])) {
         ESP_LOGW(TAG, "pwm_compile overflow; keeping previous frame");
         return;
     }
+    memcpy(s_last_reqs, reqs, sizeof s_last_reqs);
+    s_have_last_reqs = true;
 
     portENTER_CRITICAL();
     if (s_running) {
@@ -284,6 +352,13 @@ static void publish_duties(color5_t duties) {
         engine_first_arm();
     }
     portEXIT_CRITICAL();
+}
+
+// Curve-mapped path: computed duties with each channel's configured phase+period.
+static void publish_duties(color5_t duties) {
+    pwm_chan_req_t reqs[PWM_CHANNELS];
+    build_reqs(duties, reqs);
+    publish_reqs(reqs);
 }
 
 // ---- public API -------------------------------------------------------------
@@ -300,7 +375,36 @@ void pwm_output_set_default(void) {
                                   bulb_config_get_float(CFG_DEFAULT_CW)));
 }
 
+void pwm_output_set_raw(const float duties[COLOR_COUNT],
+                        const uint8_t period_log2[COLOR_COUNT]) {
+    // Raw path: clamp duties to [0,1] but skip the curve and max-power cap, and
+    // take each channel's period straight from the packet (clamped to range).
+    pwm_chan_req_t reqs[PWM_CHANNELS];
+    for (int i = 0; i < PWM_CHANNELS; i++) {
+        const int src = s_channels[i].source;
+        reqs[i].duty = clamp01(duties[src]);
+
+        float f = s_channels[i].base_phase / 360.0f;  // degrees -> [0,1) fraction
+        if (f < 0.0f) f += 1.0f;
+        reqs[i].phase = f;
+
+        uint8_t n = period_log2[src];
+        if (n < PWM_PERIOD_LOG2_MIN) n = PWM_PERIOD_LOG2_MIN;
+        else if (n > PWM_PERIOD_LOG2_MAX) n = PWM_PERIOD_LOG2_MAX;
+        reqs[i].period_log2 = n;
+    }
+    publish_reqs(reqs);
+}
+
 void pwm_output_init(void) {
+    // Detect the CPU->tick shift from the real CPU frequency (this SDK defaults to
+    // 160 MHz -> 32 cycles/tick -> shift 5; 80 MHz -> 16 -> shift 4). Must be set
+    // before the ISR ever runs. esp_clk_cpu_freq() is a couple of global reads, so
+    // this costs nothing at cold start. 200 ns/tick, so cycles/tick = MHz / 5.
+    const uint32_t cpt = ((uint32_t)esp_clk_cpu_freq() / 1000000u * PWM_TICK_NS) / 1000u;
+    s_cyc_shift = 0;
+    while ((1u << s_cyc_shift) < cpt) s_cyc_shift++;  // log2(cpt); 16->4, 32->5
+
     build_luts();
 
     // Configure every channel pin as a low output before driving PWM.
@@ -334,7 +438,9 @@ void pwm_output_init(void) {
     // Compile + light the default color now — no radio needed (FRC1 ticks from boot).
     pwm_output_set_default();
 
-    ESP_LOGI(TAG, "pwm init: %d channels, %d ns/tick, default period 2^%d ticks%s",
-             PWM_CHANNELS, PWM_TICK_NS, PWM_DEFAULT_PERIOD_LOG2,
+    ESP_LOGI(TAG, "pwm init: %d channels, %d ns/tick, cpu %d MHz -> cyc_shift %u, "
+             "default period 2^%d ticks%s",
+             PWM_CHANNELS, PWM_TICK_NS, esp_clk_cpu_freq() / 1000000,
+             (unsigned)s_cyc_shift, PWM_DEFAULT_PERIOD_LOG2,
              OMIT_I2C_PINS ? " (green+blue omitted: GPIO12/14 left for I2C)" : "");
 }
