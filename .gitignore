@@ -1,0 +1,5 @@
+﻿test/test_protocol
+test/test_protocol.exe
+test/*.pdb
+build/
+.pio/
