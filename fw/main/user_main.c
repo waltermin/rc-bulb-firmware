@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "rtos_pub.h"
 #include "gpio_pub.h"     // gpio_config / gpio_output + GMODE_* enum
@@ -22,13 +23,18 @@
 #include "config.h"
 #include "protocol.h"
 #include "controller.h"
+#include "dfu2.h"
 
 static controller_t g_ctrl;
 static uint8_t g_myId = RCSW_MY_ID;
 static uint32_t g_ms;                 // coarse ms clock (bumped in the main loop)
 
 // diagnostics
-static volatile uint32_t g_rxFrames, g_rxOurs, g_rxRelay, g_rxLed;
+static volatile uint32_t g_rxFrames, g_rxOurs, g_rxRelay, g_rxLed, g_rxDfu;
+
+// DFU2 request captured in the RX callback, acted on by the main loop.
+static volatile int g_dfuPending;
+static dfu2_params_t g_dfuParams;
 
 static uint32_t now_ms(void) { return g_ms; }
 
@@ -53,6 +59,27 @@ static void monitor_rx(uint8_t *data, int len, wifi_link_info_t *info) {
         g_rxLed++;
         controller_on_led(&g_ctrl, r.led_state, now);
         set_led(r.led_state);
+    }
+    if (r.dfu2_requested && !g_dfuPending && !dfu2_in_progress()) {
+        // Self-terminating: only act if the advertised build differs from ours.
+        uint8_t mine[PROTO_DFU2_BUILD_ID_LEN];
+        dfu2_own_build_id(mine);
+        uint8_t n = r.dfu2.build_id_len;
+        if (n > PROTO_DFU2_BUILD_ID_LEN) n = PROTO_DFU2_BUILD_ID_LEN;
+        if (memcmp(r.dfu2.build_id, mine, n) != 0) {
+            g_rxDfu++;
+            // Copy the aliased packet fields before the RX buffer is reused.
+            memset(&g_dfuParams, 0, sizeof(g_dfuParams));
+            memcpy(g_dfuParams.build_id, r.dfu2.build_id, n);
+            g_dfuParams.build_id_len = n;
+            if (r.dfu2.ssid_len < sizeof(g_dfuParams.ssid))
+                memcpy(g_dfuParams.ssid, r.dfu2.ssid, r.dfu2.ssid_len);
+            if (r.dfu2.pass_len < sizeof(g_dfuParams.pass))
+                memcpy(g_dfuParams.pass, r.dfu2.pass, r.dfu2.pass_len);
+            memcpy(g_dfuParams.server_ip, r.dfu2.server_ip, 4);
+            g_dfuParams.server_port = r.dfu2.server_port;
+            g_dfuPending = 1;
+        }
     }
 }
 
@@ -83,16 +110,31 @@ void user_main(void) {
     bk_wlan_set_channel_sync(RCSW_WIFI_CHANNEL);
     bk_printf("monitor started on chan %d\r\n", RCSW_WIFI_CHANNEL);
 
-    // Main loop: advance the clock, run the fallback timers, log stats.
+    // Main loop: advance the clock, run the fallback timers, drive DFU2.
     uint32_t tick = 0;
     for (;;) {
         rtos_delay_milliseconds(200);
         g_ms += 200;
-        apply_outputs();
+
+        if (dfu2_in_progress()) {
+            // Fast blink P6 as the "updating" indicator (single LED, so a
+            // pattern rather than the bulb's steady blue). Don't touch the
+            // relay: it holds its last state through the update.
+            set_led((tick & 1) ? 1 : 0);
+        } else if (g_dfuPending) {
+            g_dfuPending = 0;
+            bk_printf("rc-switch: DFU2 requested -> ap='%s' %u.%u.%u.%u:%u\r\n",
+                      g_dfuParams.ssid, g_dfuParams.server_ip[0], g_dfuParams.server_ip[1],
+                      g_dfuParams.server_ip[2], g_dfuParams.server_ip[3], g_dfuParams.server_port);
+            dfu2_start(g_myId, &g_dfuParams);
+        } else {
+            apply_outputs();  // fallback timers when no packets arrive
+        }
+
         if (++tick % 5 == 0) {  // ~1 Hz
-            bk_printf("rc-switch: frames=%u ours=%u relay=%u led=%u out(r=%d,l=%d)\r\n",
+            bk_printf("rc-switch: frames=%u ours=%u relay=%u led=%u dfu=%u out(r=%d,l=%d)\r\n",
                       (unsigned)g_rxFrames, (unsigned)g_rxOurs,
-                      (unsigned)g_rxRelay, (unsigned)g_rxLed,
+                      (unsigned)g_rxRelay, (unsigned)g_rxLed, (unsigned)g_rxDfu,
                       controller_relay_out(&g_ctrl, now_ms()),
                       controller_led_out(&g_ctrl, now_ms()));
         }
