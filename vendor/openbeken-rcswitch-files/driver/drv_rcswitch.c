@@ -69,8 +69,7 @@ static void rcsw_monitor_rx(uint8_t *data, int len, wifi_link_info_t *info) {
     if (r.has_led) {
         g_rxLed++;
         controller_on_led(&g_ctrl, r.led_state, now);
-        // (LED pin is used as a driver-alive heartbeat during bring-up, so we
-        // don't drive it from RX here; relay P9 is the RX indicator.)
+        HAL_PIN_SetOutputValue(RCSW_PIN_LED, r.led_state ? 1 : 0);
     }
 }
 
@@ -101,13 +100,7 @@ void RCSwitch_Init(void) {
 void RCSwitch_OnEverySecond(void) {
     g_secs++;
 
-    // Driver-alive heartbeat on P6 (LED), visible to the jig via pin sense even
-    // though OpenBeken's own logs go out UART2 (not the UART1 the jig reads).
-    static int hb = 0;
-    hb = !hb;
-    HAL_PIN_SetOutputValue(RCSW_PIN_LED, hb);
-
-    // Re-assert monitor mode + channel every second. OpenBeken actively manages
+    // Re-assert monitor mode + channel each second. OpenBeken actively manages
     // wifi (it brings up a config AP), which can pull the radio out of monitor;
     // re-asserting keeps us sniffing on our channel.
     if (g_secs >= 3) {
@@ -116,6 +109,12 @@ void RCSwitch_OnEverySecond(void) {
         bk_wlan_set_channel_sync(RCSW_CHANNEL);
         g_monitorStarted = 1;
     }
+
+    // Apply outputs from the controller so the per-packet-type fallback timers
+    // take effect: if no RelaysUpdate / RelaysLedUpdate is heard for the window,
+    // the relay / LED revert to their configured defaults.
+    rcsw_apply_outputs();
+
     ADDLOG_INFO(LOG_FEATURE_GENERAL, "RCSwitch: frames=%u ours=%u relay=%u led=%u\r\n",
               (unsigned)g_rxFrames, (unsigned)g_rxOurs, (unsigned)g_rxRelay, (unsigned)g_rxLed);
 }

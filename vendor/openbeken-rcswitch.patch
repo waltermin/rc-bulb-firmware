@@ -63,7 +63,7 @@ index fb0d290..8e7877f 100644
  #if PLATFORM_BEKEN_NEW
  #include "uart.h"
 diff --git a/src/obk_config.h b/src/obk_config.h
-index 92d1521..bbb9733 100644
+index 92d1521..4f1714f 100644
 --- a/src/obk_config.h
 +++ b/src/obk_config.h
 @@ -158,6 +158,7 @@
@@ -74,17 +74,34 @@ index 92d1521..bbb9733 100644
  #define ENABLE_HA_DISCOVERY						1
  #define ENABLE_SEND_POSTANDGET					1
  #define ENABLE_MQTT								1
+@@ -274,6 +275,8 @@
+ 
+ #elif PLATFORM_BEKEN
+ 
++#define ENABLE_DRIVER_RCSWITCH					1
++
+ //#define ENABLE_LFS_SPI						1
+ //#define ENABLE_DRIVER_TESTSPIFLASH			1
+ 
 diff --git a/src/user_main.c b/src/user_main.c
-index 49f79ed..12e9ba1 100644
+index 49f79ed..35ff23e 100644
 --- a/src/user_main.c
 +++ b/src/user_main.c
-@@ -1298,6 +1298,12 @@ void Main_Init_AfterDelay_Unsafe(bool bStartAutoRunScripts) {
+@@ -1298,6 +1298,20 @@ void Main_Init_AfterDelay_Unsafe(bool bStartAutoRunScripts) {
  
  	CMD_Init_Delayed();
  
 +#if ENABLE_DRIVER_RCSWITCH
-+	// rc-switch-firmware: auto-start the RC monitor-mode relay driver at boot
-+	// (OpenBeken normally requires an explicit startDriver / autoexec.bat).
++	// rc-switch-firmware bring-up: bring up a command console on UART1 (the wire
++	// the bench jig reads) so logs come out and commands go in — OpenBeken
++	// normally logs on UART2. UART_PORT is set to UART1 in logging.c.
++	{
++		extern void CMD_UARTConsole_Init(void);
++		CFG_SetFlag(OBK_FLAG_CMD_ACCEPT_UART_COMMANDS, true);
++		CMD_UARTConsole_Init();
++	}
++	// Auto-start the RC monitor-mode relay driver at boot (OpenBeken normally
++	// requires an explicit startDriver / autoexec.bat).
 +	DRV_StartDriver("RCSwitch");
 +#endif
 +
