@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Recover the BK7238 bootloader region (0x0..0x11000) reliably.
+"""Recover the BK7238 bootloader region (0x0..0x11000) using IDENTITY addressing.
 
-The T1-2S-NL bootloader isn't in bk7231tools' DB ("Unknown bootloader CRC"),
-so the automatic boot-protection bypass is unreliable for the protected boot
-sectors. This forces the SR fully unprotected, writes with the bypass toggled
-explicitly, and verifies by reading back through the SAME path — retrying the
-whole sequence until the first 256 bytes match.
+The T1-2S-NL bootloader CRC is unknown to bk7231tools, so its automatic
+boot-protection *bypass* (which writes to an aliased address = offset +
+flash_size) is unreliable here: writes/verifies through the alias can succeed
+while the chip still boots from an erased physical 0x0.
+
+This writes and verifies the boot region with boot_protection_bypass = FALSE
+(identity addressing = real physical sectors), after clearing the flash status-
+register protection so the low sectors are directly writable. Verify reads use
+the same identity path, so a pass means the bytes the chip actually boots from
+are correct.
+
+Usage: python tools/recover_boot.py [stock_boot.bin]
+  stock_boot.bin = first 0x11000 bytes of the stock full-flash backup.
 """
 import sys
 import time
@@ -14,9 +22,14 @@ import serial
 from serial.tools import list_ports
 from bk7231tools.serial import BK7231Serial
 
+try:
+    from bk7231tools.serial.base import EraseSize
+except ImportError:
+    from bk7231tools.serial.base.enums import EraseSize
+
 MY_SERIAL = "5C94136993"
 BRIDGE_EXIT = bytes([0xDE, 0xAD, 0xBE, 0xEF]) + b"BKJIG-EXIT42"
-BOOT = open(sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\rose\AppData\Local\Temp\stock_boot.bin", "rb").read()
+DEFAULT_BOOT = r"C:\Users\rose\AppData\Local\Temp\stock_boot.bin"
 
 
 def find_port():
@@ -48,31 +61,36 @@ def leave(port):
     s.close()
 
 
-def try_once(port, force_bypass):
+def main():
+    boot = open(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BOOT, "rb").read()
+    assert len(boot) % 4096 == 0, "boot image must be a whole number of 4K sectors"
+    port = find_port()
+    print(f"boot image: {len(boot)} bytes ({len(boot)//4096} sectors)")
     enter(port)
     bk = None
     try:
         bk = BK7231Serial(port, baudrate=115200, link_timeout=25.0, cmnd_timeout=3.0)
         bk.info = lambda *a: None
         bk.connect()
-        # Force the bypass state we want to test.
-        bk.boot_protection_bypass = force_bypass
-        bk.flash_unprotect()
-        # Write the whole boot region in 4K sectors.
-        for off in range(0, len(BOOT), 4096):
-            chunk = BOOT[off:off + 4096]
-            bk.flash_write_4k(off, chunk, crc_check=False)
-        # Verify first + a middle + last sector.
-        ok = True
-        for off in (0x0, 0x8000, 0x10000):
-            rb = bk.flash_read_bytes(off, 256, crc_check=False)
-            if rb != BOOT[off:off + 256]:
-                ok = False
-                break
-        return ok
-    except Exception as e:
-        print(f"  attempt error: {e}")
-        return False
+        bk.boot_protection_bypass = False   # identity addressing = physical sectors
+        bk.flash_unprotect()                # clear SR BP bits so low sectors write
+
+        for off in range(0, len(boot), 4096):
+            bk.flash_erase_block(off, EraseSize.SECTOR_4K)
+            bk.flash_write_4k(off, boot[off:off + 4096], crc_check=True)
+
+        # Verify EVERY sector via the identity path (what the chip boots from).
+        bad = []
+        for off in range(0, len(boot), 4096):
+            rb = bk.flash_read_bytes(off, 4096, crc_check=False)
+            if rb != boot[off:off + 4096]:
+                bad.append(off)
+        if bad:
+            print(f"FAIL: {len(bad)} sector(s) mismatch, first at 0x{bad[0]:X}")
+            print(f"  physical 0x0 head: {bk.flash_read_bytes(0,16,crc_check=False).hex()}")
+            sys.exit(1)
+        print(f"SUCCESS: boot region verified byte-exact (identity), 0x0 head "
+              f"{bk.flash_read_bytes(0,16,crc_check=False).hex()}")
     finally:
         if bk:
             try:
@@ -84,19 +102,6 @@ def try_once(port, force_bypass):
             except Exception:
                 pass
         leave(port)
-
-
-def main():
-    port = find_port()
-    print(f"boot image: {len(BOOT)} bytes")
-    for bypass in (True, False):
-        for attempt in range(3):
-            print(f"bypass={bypass} attempt={attempt}...")
-            if try_once(port, bypass):
-                print(f"SUCCESS with boot_protection_bypass={bypass}")
-                return
-    print("FAILED: bootloader region still not writable by any method tried")
-    sys.exit(1)
 
 
 if __name__ == "__main__":
