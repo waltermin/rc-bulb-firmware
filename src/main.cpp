@@ -23,6 +23,14 @@ void bk_wlan_register_monitor_cb(monitor_cb_t fn);
 int bk_wlan_start_monitor(void);
 int bk_wlan_stop_monitor(void);
 int bk_wlan_set_channel(int channel);
+
+// Bring up the BDK wifi core WITHOUT enabling STA/AP. These are what the WiFi
+// library calls internally on first mode change; calling them directly lets us
+// enter monitor mode from a clean core (WiFi.mode(WIFI_STA) enables STA, which
+// then fights bk_wlan_start_monitor and crash-loops via MM_RESET_REQ).
+void func_init_extended(void);
+void app_pre_start(void);
+void *xTaskGetHandle(const char *name);  // FreeRTOS: check init_thread completion
 }
 
 static controller_t ctrl;
@@ -49,6 +57,10 @@ static void monitor_rx(uint8_t *data, int len, void *) {
     if (r.has_relay) {
         rx_relay_pkts++;
         controller_on_relay(&ctrl, r.relay_state, now);
+        // DIAGNOSTIC: drive the relay pin straight from RX so a jig broadcast
+        // toggling it (visible via jig GPIO16 sense) proves monitor RX works,
+        // independent of UART.
+        digitalWrite(GPIO_RELAY, r.relay_state ? HIGH : LOW);
     }
     if (r.has_led) {
         rx_led_pkts++;
@@ -93,17 +105,36 @@ void setup() {
     // hard-faults. Bring the stack up as STA (associates with nothing), then
     // switch to monitor.
 #if SPIKE_USE_WIFI
-    WiFi.mode(WIFI_STA);
-    Serial1.println("wlan stack up");
-#endif
+    // Init the wifi core (no STA/AP), then enter monitor mode.
+    func_init_extended();
+    app_pre_start();
+    for (int i = 0; i < 500 && xTaskGetHandle("init_thread"); i++) delay(10);
+    delay(200);
+    Serial1.println("wlan core up");
+
     bk_wlan_register_monitor_cb(monitor_rx);
     bk_wlan_start_monitor();
     bk_wlan_set_channel(WIFI_CHANNEL);
     Serial1.println("monitor mode started");
+#else
+    Serial1.println("radio disabled (boot/GPIO-only build)");
+#endif
 }
 
 void loop() {
-    apply_outputs();
+    // DIAGNOSTIC: drive the LED pin from a 1 Hz heartbeat as a UART-independent
+    // liveness signal (the BDK wifi init appears to take over UART1, hiding our
+    // Serial1 prints). The jig senses P6 via GPIO15, so 1 Hz EVT LED in MON
+    // proves loop() runs even with no UART. apply_outputs() is suppressed here
+    // so it doesn't fight the blink; monitor_rx still updates the controller.
+    static uint32_t last_hb = 0;
+    static bool hb = false;
+    if (millis() - last_hb >= 1000) {
+        last_hb = millis();
+        hb = !hb;
+        Serial1.printf("[hb] up=%lums led_pin=%d\r\n", (unsigned long)millis(), hb);
+        digitalWrite(GPIO_LED, hb ? HIGH : LOW);
+    }
 
     // Minimal bench console on UART1: single-char commands.
     while (Serial1.available()) {
