@@ -3,3 +3,4 @@ test/test_protocol.exe
 test/*.pdb
 build/
 .pio/
+vendor/libretiny/

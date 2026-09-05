@@ -1,0 +1,21 @@
+diff --git a/cores/beken-72xx/arduino/libraries/WiFi/WiFiSTA.cpp b/cores/beken-72xx/arduino/libraries/WiFi/WiFiSTA.cpp
+index 9bb2520..9f9b330 100644
+--- a/cores/beken-72xx/arduino/libraries/WiFi/WiFiSTA.cpp
++++ b/cores/beken-72xx/arduino/libraries/WiFi/WiFiSTA.cpp
+@@ -213,12 +213,10 @@ const String WiFiClass::SSID() {
+ }
+ 
+ const String WiFiClass::psk() {
+-	if (!isConnected())
+-		return "";
+-	struct wpa_supplicant *wpas = wpa_suppliant_ctrl_get_wpas();
+-	if (!wpas || !wpas->conf || !wpas->conf->ssid)
+-		return "";
+-	return (char *)wpas->conf->ssid->passphrase;
++	// rc-switch-firmware local patch: the BK7238 BDK's wpa_supplicant keeps
++	// struct wpa_config opaque, so the stored-passphrase getter cannot build
++	// against this family. Nothing in this project reads it.
++	return "";
+ }
+ 
+ uint8_t *WiFiClass::BSSID() {
