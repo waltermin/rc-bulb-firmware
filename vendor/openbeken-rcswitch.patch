@@ -1,0 +1,93 @@
+diff --git a/platforms/obk_main.mk b/platforms/obk_main.mk
+index ac37f92..950f74b 100644
+--- a/platforms/obk_main.mk
++++ b/platforms/obk_main.mk
+@@ -138,6 +138,9 @@ OBKM_SRC  += $(OBK_SRCS)libraries/obktime/obktime.c
+ OBKM_SRC  += $(OBK_SRCS)driver/drv_timed_events.c
+ OBKM_SRC  += $(OBK_SRCS)driver/drv_openWeatherMap.c
+ OBKM_SRC  += $(OBK_SRCS)driver/drv_pir.c
++OBKM_SRC  += $(OBK_SRCS)driver/drv_rcswitch.c
++OBKM_SRC  += $(OBK_SRCS)driver/protocol.c
++OBKM_SRC  += $(OBK_SRCS)driver/controller.c
+ OBKM_SRC  += $(OBK_SRCS)driver/drv_pixelAnim.c
+ OBKM_SRC  += $(OBK_SRCS)driver/drv_pt6523.c
+ OBKM_SRC  += $(OBK_SRCS)driver/drv_pwm_groups.c
+diff --git a/src/driver/drv_main.c b/src/driver/drv_main.c
+index a20f0eb..644dded 100644
+--- a/src/driver/drv_main.c
++++ b/src/driver/drv_main.c
+@@ -25,6 +25,7 @@
+ #include "drv_ds3231.h"
+ #include "drv_hlw8112.h"
+ #include "drv_DCF77.h"
++#include "drv_rcswitch.h"
+ 
+ void DRV_MQTTServer_Init();
+ void DRV_MQTTServer_AppendInformationToHTTPIndexPage(http_request_t *request, int bPreState);
+@@ -129,6 +130,22 @@ static driver_t g_drivers[] = {
+ 	false,                                   // loaded
+ 	},
+ #endif
++#if ENABLE_DRIVER_RCSWITCH
++	//drvdetail:{"name":"RCSwitch",
++	//drvdetail:"title":"RC broadcast relay switch",
++	//drvdetail:"descr":"Listens in 802.11 monitor mode for the RC vendor-IE beacon protocol (0x06 RelaysUpdate / 0x07 RelaysLedUpdate) and drives the relay + status LED. For the Tuya T1-2S-NL (BK7238).",
++	//drvdetail:"requires":""}
++	{ "RCSwitch",                            // Driver Name
++	RCSwitch_Init,                           // Init
++	RCSwitch_OnEverySecond,                  // onEverySecond
++	NULL,                                    // appendInformationToHTTPIndexPage
++	RCSwitch_RunQuickTick,                   // runQuickTick
++	RCSwitch_Stop,                           // stopFunction
++	NULL,                                    // onChannelChanged
++	NULL,                                    // onHassDiscovery
++	false,                                   // loaded
++	},
++#endif
+ #if ENABLE_DRIVER_DMX
+ 	//drvdetail:{"name":"DMX",
+ 	//drvdetail:"title":"TODO",
+diff --git a/src/logging/logging.c b/src/logging/logging.c
+index fb0d290..8e7877f 100644
+--- a/src/logging/logging.c
++++ b/src/logging/logging.c
+@@ -17,8 +17,8 @@ extern int g_secondsElapsed;
+ #if PLATFORM_BEKEN
+ // to get uart.h
+ #include "command_line.h"
+-int UART_PORT = UART2_PORT;
+-int UART_PORT_INDEX = 1;
++int UART_PORT = UART1_PORT;   // rc-switch bring-up: log on UART1 (the jig reads it)
++int UART_PORT_INDEX = 0;
+ #endif
+ #if PLATFORM_BEKEN_NEW
+ #include "uart.h"
+diff --git a/src/obk_config.h b/src/obk_config.h
+index 92d1521..bbb9733 100644
+--- a/src/obk_config.h
++++ b/src/obk_config.h
+@@ -158,6 +158,7 @@
+ #define ENABLE_HTTP_OVERRIDE					1
+ #define ENABLE_DRIVER_TCL						1
+ #define ENABLE_DRIVER_PIR						1
++#define ENABLE_DRIVER_RCSWITCH					1
+ #define ENABLE_HA_DISCOVERY						1
+ #define ENABLE_SEND_POSTANDGET					1
+ #define ENABLE_MQTT								1
+diff --git a/src/user_main.c b/src/user_main.c
+index 49f79ed..12e9ba1 100644
+--- a/src/user_main.c
++++ b/src/user_main.c
+@@ -1298,6 +1298,12 @@ void Main_Init_AfterDelay_Unsafe(bool bStartAutoRunScripts) {
+ 
+ 	CMD_Init_Delayed();
+ 
++#if ENABLE_DRIVER_RCSWITCH
++	// rc-switch-firmware: auto-start the RC monitor-mode relay driver at boot
++	// (OpenBeken normally requires an explicit startDriver / autoexec.bat).
++	DRV_StartDriver("RCSwitch");
++#endif
++
+ 	if (bStartAutoRunScripts) {
+ 		if (PIN_FindPinIndexForRole(IOR_IRRecv, -1) != -1 || PIN_FindPinIndexForRole(IOR_IRSend, -1) != -1
+ 			|| PIN_FindPinIndexForRole(IOR_IRRecv_nPup, -1) != -1) {

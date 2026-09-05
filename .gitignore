@@ -4,3 +4,5 @@ test/*.pdb
 build/
 .pio/
 vendor/libretiny/
+vendor/OpenBK7231T_App/
+output/*.bin
