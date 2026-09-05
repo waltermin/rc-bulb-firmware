@@ -6,6 +6,11 @@
 
 #include <Arduino.h>
 
+#define SPIKE_USE_WIFI 1
+#if SPIKE_USE_WIFI
+#include <WiFi.h>  // used ONLY to initialize the WLAN stack before monitor mode
+#endif
+
 extern "C" {
 #include "config.h"
 #include "controller.h"
@@ -83,6 +88,14 @@ void setup() {
     Serial1.println();
     Serial1.printf("rc-switch-firmware P0 spike | id=%u chan=%u\r\n", my_id, WIFI_CHANNEL);
 
+    // The BDK's WLAN stack (func_init_extended/app_pre_start) is initialized
+    // lazily by the WiFi library; bk_wlan_start_monitor() on a cold radio
+    // hard-faults. Bring the stack up as STA (associates with nothing), then
+    // switch to monitor.
+#if SPIKE_USE_WIFI
+    WiFi.mode(WIFI_STA);
+    Serial1.println("wlan stack up");
+#endif
     bk_wlan_register_monitor_cb(monitor_rx);
     bk_wlan_start_monitor();
     bk_wlan_set_channel(WIFI_CHANNEL);
