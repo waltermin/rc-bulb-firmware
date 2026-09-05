@@ -6,3 +6,11 @@ build/
 vendor/libretiny/
 vendor/OpenBK7231T_App/
 output/*.bin
+
+# build artifacts
+*.app.o
+*.app.d
+*.o
+*.d
+vendor/fw/
+output/*.bin
