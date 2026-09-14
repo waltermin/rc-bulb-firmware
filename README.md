@@ -31,12 +31,15 @@ purpose-built control path:
 | Warm White | 13 |
 
 PWM is driven by a custom software engine (`pwm_output.*` + `pwm_schedule.*`) on
-the ESP8266 FRC1 hardware timer, so it needs no radio and the LEDs light at boot.
-Each channel gets its own duty, phase, and PWM rate: periods are powers of two in
-200 ns ticks, so all channels are harmonics that stack into one repeatable edge
-table walked by an IRAM-resident ISR. Fine (200 ns) ticks keep the dimmest pulses
-sharp instead of quantizing them to 1 µs. Capped at 80 % duty, gamma 2.8; the
-default rate is ~1.2 kHz (`2^12` ticks) — all configurable in `main/config.h`.
+the Wi-Fi WDEV/TSF0 timer at NMI level — the same timer the stock SDK PWM uses,
+which is why it is glitch-free. Each channel gets its own duty, phase, and PWM
+rate: the schedule is counted in 1 µs ticks (one tick == one TSF microsecond, so
+periods are powers of two — `2^n µs`, `1000000/2^n` Hz — and all channels are
+harmonics that stack into one repeatable edge table walked by an IRAM-resident ISR
+paced against the free-running TSF counter). Capped at 80 % duty, gamma 2.8; the
+default rate is ~977 Hz (`2^10` µs) — all configurable in `main/config.h`. (A brief
+static color shows at boot; real modulation begins once the radio — hence the TSF
+timer — is up, via `pwm_output_start_after_radio()`.)
 
 ## Layout
 
@@ -44,7 +47,7 @@ default rate is ~1.2 kHz (`2^12` ticks) — all configurable in `main/config.h`.
 main/
   config.h        all tunables (#defines)
   app_main.c      startup ordering + wiring
-  pwm_output.*    5-channel PWM engine (curve + max_power; FRC1 ISR + GPIO)
+  pwm_output.*    5-channel PWM engine (curve + max_power; WDEV/TSF0 ISR + GPIO)
   pwm_schedule.*  pure per-channel duty/phase/period -> edge-table compiler
   id_store.*      bulb id from NVS
   sniffer.*       promiscuous RX -> parser -> controller (+ build-id gate for DFU2)

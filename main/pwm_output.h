@@ -1,9 +1,10 @@
 // pwm_output.h — 5-channel LED PWM on a custom, self-contained software engine.
 //
-// Each channel has its own duty, phase, and period. The engine runs on the
-// ESP8266 FRC1 hardware timer (radio-independent, 200 ns ticks) and compiles the
-// channels into one repeatable edge table walked by an IRAM-resident ISR, so the
-// LEDs light immediately at boot and keep running through OTA flash writes.
+// Each channel has its own duty, phase, and period. The engine runs on the Wi-Fi
+// WDEV/TSF0 timer (NMI level, 1 us ticks) and compiles the channels into one
+// repeatable edge table walked by an IRAM-resident ISR that keeps running through
+// OTA flash writes. A static default color shows at boot; real modulation begins
+// once the radio (hence the TSF timer) is up — see pwm_output_start_after_radio().
 //
 // The drive path is: pwm_output_set() runs the duty-response curve + max-power cap
 // (levels_to_duties()), then pwm_compile() (in pwm_schedule.c) turns per-channel

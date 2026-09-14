@@ -56,25 +56,24 @@
 // The active channel set is derived from OMIT_I2C_PINS in pwm_output.c (channel
 // indices are generated there, not hard-coded here).
 
-// ---- PWM engine timing model (custom FRC1-driven software PWM) --------------
-// The engine (pwm_schedule.*/pwm_output.c) runs on the ESP8266 FRC1 hardware
-// timer at clkdiv16, so one timer tick = 200 ns (5 ticks/us). EVERYTHING in the
-// schedule — block lengths, on/off times, phase, edge offsets — is counted in
-// these ticks, never in microseconds. Finer-than-us ticks let the dimmest pulses
-// stay sharp (down to a couple hundred ns) instead of being quantized to 1 us.
-#define PWM_TICK_NS 200
-#define PWM_TICKS_PER_US 5
+// ---- PWM engine timing model (custom WDEV/TSF0-driven software PWM) ---------
+// One tick = 1 us, the resolution of the free-running Wi-Fi TSF0 counter the ISR
+// paces edges against — so a schedule tick is a TSF microsecond and the ISR works
+// in the timer's own units. EVERYTHING in the schedule (block lengths, on/off times,
+// phase, edge offsets) is counted in these 1 us ticks. This is the same timer and
+// resolution the stock SDK PWM uses, which is glitch-free because a single
+// free-running counter is read atomically with a single load.
 
-// Each channel's PWM period is a power-of-two number of ticks: period = 2^n ticks
-// (so all channels are harmonics and stack into one repeatable schedule). n is
-// bounded so the compiled edge table stays small; widen only with an eye on
-// PWM_MAX_EDGES / DRAM (see pwm_schedule.h). At 200 ns/tick:
-//   n=10 -> 1024 ticks = 204.8 us ~= 4.9 kHz
-//   n=12 -> 4096 ticks = 819.2 us ~= 1.22 kHz   (the interim default)
-//   n=16 -> 65536 ticks = 13.1 ms ~= 76 Hz
-#define PWM_PERIOD_LOG2_MIN 10
-#define PWM_PERIOD_LOG2_MAX 16
-#define PWM_DEFAULT_PERIOD_LOG2 12  // ~1.22 kHz; used until the dynamic-rate algo lands
+// Each channel's PWM period is a power-of-two number of ticks: period = 2^n us (so
+// all channels are harmonics and stack into one repeatable schedule) and the PWM
+// frequency is 1000000 / 2^n Hz. n is bounded so the compiled edge table stays small;
+// widen only with an eye on PWM_MAX_EDGES / DRAM (see pwm_schedule.h). At 1 us/tick:
+//   n=8  -> 256 us   ~= 3.9 kHz   (fast end)
+//   n=10 -> 1024 us  ~= 977 Hz    (default; ~1 kHz, ~0.1% duty steps)
+//   n=14 -> 16384 us ~= 61 Hz     (slow end; for the future per-channel rate algo)
+#define PWM_PERIOD_LOG2_MIN 8
+#define PWM_PERIOD_LOG2_MAX 14
+#define PWM_DEFAULT_PERIOD_LOG2 10  // ~977 Hz; used until the dynamic-rate algo lands
 
 // Per-physical-channel period exponent. All default to PWM_DEFAULT_PERIOD_LOG2
 // today; a future fidelity-driven algorithm will vary these per channel.
@@ -90,36 +89,27 @@
 #define PWM_MAX_CHANNELS 5
 
 // Jitter control. The engine rides the Wi-Fi WDEV/TSF0 timer: it arms a compare to
-// fire PWM_AHEAD_TICKS ticks BEFORE the next edge (a RELATIVE, schedule-derived
-// delay — always bounded), then busy-waits a short, hard-capped spin on the CPU
-// cycle counter (CCOUNT) to toggle the GPIO at the edge's exact time. Because the
-// WDEV interrupt runs at Wi-Fi priority — above the level-1 critical sections that
-// caused FRC1's flicker — latency is low and consistent, so a small window suffices.
-// NOTE: at Wi-Fi priority the spin briefly delays the radio, so SMALLER is now
-// better (less sniffer impact): 40 ticks = 8 us matches the stock SDK PWM's margin.
-// Raise only if residual flicker appears; lower to reduce RX impact.
-#define PWM_AHEAD_TICKS 40
-
-// Upper bound on a "late edge" the re-anchor will act on, in ticks. A real edge is
-// never later than roughly one period; a jump of ~one RTOS tick (~10 ms = 50000
-// ticks) is the monotonic clock's rare read glitch, not real lateness. Re-anchoring
-// to such a value would corrupt the timebase, so the ISR ignores lateness beyond
-// this. Keep it well above the largest period (2^PWM_PERIOD_LOG2_MAX) and well below
-// one tick's worth of ticks (~50000).
-#define PWM_REANCHOR_MAX_TICKS 20000
+// fire PWM_AHEAD_US us BEFORE the next edge (the stock PWM's exact dance: freeze TSF,
+// zero it, set a RELATIVE compare, re-enable — always bounded and always in the
+// future), then busy-waits a short, hard-capped spin on the free-running TSF counter
+// to toggle the GPIO at the edge's exact us. Because the WDEV interrupt runs at NMI
+// (above the level-1 critical sections that caused FRC1's flicker), latency is low
+// and consistent, so a small window suffices. At NMI the spin briefly delays the
+// radio, so SMALLER is better (less sniffer impact): 8 us matches the stock SDK PWM's
+// margin. Raise only if residual flicker appears; lower to reduce RX impact.
+#define PWM_AHEAD_US 8
 
 // Hard ceiling on a single spin, in loop iterations (NOT time): a pure safety valve
-// so the spin always terminates even if the monotonic clock momentarily freezes
-// (which it does for a few ns when our NMI preempts the RTOS tick handler mid-update
-// — see mono_clock.h). Must comfortably exceed the normal spin length, which is
-// ~PWM_AHEAD_TICKS ticks of wall time (a few hundred iterations); 512 covers the
-// default with margin. Raise it in step with PWM_AHEAD_TICKS.
+// so the spin always terminates even if s_target is ever bad. The TSF counter is
+// free-running and monotonic, so a normal spin self-limits to ~PWM_AHEAD_US us (a few
+// hundred iterations) without this; 512 covers the default with margin. Raise it in
+// step with PWM_AHEAD_US.
 #define PWM_SPIN_MAX_ITERS 512
 
 // The ISR spins through ("coalesces") edges closer together than the arm-ahead
 // window instead of taking a fresh interrupt for each. This caps how long one ISR
-// invocation can hold the CPU (worst-case dwell ~ PWM_MAX_COALESCE * PWM_AHEAD_TICKS
-// ticks) so a tightly-packed schedule can't starve Wi-Fi; past the cap it arms the
+// invocation can hold the CPU (worst-case dwell ~ PWM_MAX_COALESCE * PWM_AHEAD_US
+// us) so a tightly-packed schedule can't starve Wi-Fi; past the cap it arms the
 // timer and returns even for a near edge.
 #define PWM_MAX_COALESCE 8
 
@@ -130,23 +120,8 @@
 // the color hot path, so keep it 0 except when bench-debugging the PWM math.
 // Guarded so a build can force it on with -DPWM_DEBUG_DUMP=1 without editing here.
 #ifndef PWM_DEBUG_DUMP
-#define PWM_DEBUG_DUMP 1
+#define PWM_DEBUG_DUMP 0
 #endif
-
-// Debug: when 1, the edge ISR bumps lightweight DRAM counters (no printf in the
-// ISR) and a 1 Hz task prints them — invocation rate, the largest gap between ISR
-// invocations, and how often edges were applied late (re-anchor) or the spin hit
-// its cap. Used to diagnose flicker: a huge maxgap means the ISR was starved; a
-// burst of reanchors/spincap means edges fired at the wrong time. Keep 0 in ships.
-#ifndef PWM_PROFILE
-#define PWM_PROFILE 1
-#endif
-
-// The CPU cycles per 200 ns tick used to convert schedule ticks <-> the CCOUNT
-// timebase (16 at 80 MHz, 32 at 160 MHz) is detected at RUNTIME in pwm_output_init
-// via esp_clk_cpu_freq(), not a compile-time macro: the SDK's CONFIG_* CPU-freq
-// symbols are not visible in this SDK-free header, and the actual default here is
-// 160 MHz — guessing 80 desynchronizes the timer and makes the LEDs strobe.
 
 // Fraction of full scale the LEDs are allowed to reach (stock caps at 80%).
 #define PWM_MAX_POWER 0.80f

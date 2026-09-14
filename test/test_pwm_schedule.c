@@ -127,8 +127,8 @@ static void test_dim_rounds_to_off(void) {
 }
 
 static void test_min_sharp_pulse(void) {
-    printf("one-tick pulse survives (dim-resolution win)\n");
-    // duty just over 1/1024 rounds to a single 200 ns tick high.
+    printf("one-tick pulse survives (dimmest representable pulse)\n");
+    // duty just over 1/1024 rounds to a single 1 us tick high.
     pwm_chan_req_t reqs[1] = {{.duty = 1.0f / 1024.0f, .phase = 0.0f, .period_log2 = 10}};
     pwm_schedule_t s;
     CHECK(pwm_compile(reqs, 1, &s));

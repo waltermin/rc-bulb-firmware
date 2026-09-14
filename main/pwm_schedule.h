@@ -5,8 +5,9 @@
 // on the host exactly like protocol.c.
 //
 // The engine gives each channel its own duty, phase, and period. Every period is
-// a power-of-two number of 200 ns ticks, so all channels are harmonics of one
-// another and stack into a single, perfectly repeatable schedule. That schedule
+// a power-of-two number of 1 us ticks (one tick == one Wi-Fi TSF microsecond), so
+// all channels are harmonics of one another and stack into a single, perfectly
+// repeatable schedule. That schedule
 // compiles to one linear edge table the ISR walks:
 //
 //   - Each block (one channel's square wave) is 2^n ticks long and repeats
@@ -36,9 +37,9 @@ extern "C" {
 // A channel's state byte packs one bit per channel index (bit i == channel i is
 // HIGH). That caps us at 8 channels; the real hardware has PWM_MAX_CHANNELS (5).
 _Static_assert(PWM_MAX_CHANNELS <= 8, "PWM state byte holds at most 8 channels");
-// Edge offsets pack into the high 24 bits of a uint32_t, and the FRC1 timer load
-// register is 23-bit; keeping 2^Nmax <= 2^22 leaves both with headroom.
-_Static_assert(PWM_PERIOD_LOG2_MAX <= 22, "period exponent too large for 24-bit offset / 23-bit timer");
+// Edge offsets pack into the high 24 bits of a uint32_t; keeping 2^Nmax <= 2^22
+// leaves headroom (the ISR converts these tick offsets to TSF microseconds).
+_Static_assert(PWM_PERIOD_LOG2_MAX <= 22, "period exponent too large for 24-bit offset");
 _Static_assert(PWM_PERIOD_LOG2_MIN <= PWM_PERIOD_LOG2_MAX, "PWM period-log2 range inverted");
 
 // One engine input, keyed to a physical channel index (its position in the
