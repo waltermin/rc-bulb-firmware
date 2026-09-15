@@ -35,11 +35,27 @@
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "tcpip_adapter.h"
 #include "nvs.h"
+
+#include "sdk_compat.h"
 
 #include "lwip/sockets.h"
 #include "mbedtls/sha256.h"
+
+// mbedtls 2.x (ESP8266_RTOS_SDK) spelled the error-returning SHA-256 entry points
+// with a _ret suffix; mbedtls 3.x (ESP-IDF v5) made those the plain names.
+// Identical semantics either way.
+#if defined(CONFIG_IDF_TARGET_ESP8266)
+#  define BULB_SHA256(in, len, out)        mbedtls_sha256_ret((in), (len), (out), 0)
+#  define BULB_SHA256_STARTS(ctx)          mbedtls_sha256_starts_ret((ctx), 0)
+#  define BULB_SHA256_UPDATE(ctx, in, len) mbedtls_sha256_update_ret((ctx), (in), (len))
+#  define BULB_SHA256_FINISH(ctx, out)     mbedtls_sha256_finish_ret((ctx), (out))
+#else
+#  define BULB_SHA256(in, len, out)        mbedtls_sha256((in), (len), (out), 0)
+#  define BULB_SHA256_STARTS(ctx)          mbedtls_sha256_starts((ctx), 0)
+#  define BULB_SHA256_UPDATE(ctx, in, len) mbedtls_sha256_update((ctx), (in), (len))
+#  define BULB_SHA256_FINISH(ctx, out)     mbedtls_sha256_finish((ctx), (out))
+#endif
 
 #include "config.h"
 #include "pwm_output.h"
@@ -98,7 +114,7 @@ static bool connect_to_ap(uint8_t my_id, const dfu2_params_t *p) {
     // Hostname must be set before the DHCP client starts (i.e. before connect).
     char host[32];
     snprintf(host, sizeof(host), "%s%u", DFU_HOSTNAME_PREFIX, (unsigned)my_id);
-    tcpip_adapter_set_hostname(TCPIP_ADAPTER_IF_STA, host);
+    bulb_netif_set_hostname(host);
     ESP_LOGI(TAG, "DFU2 joining AP '%s' as %s", p->ssid, host);
 
     wifi_config_t wc = {0};
@@ -153,9 +169,9 @@ void dfu2_own_build_id(uint8_t out[PROTO_DFU2_BUILD_ID_LEN]) {
     static uint8_t cached[PROTO_DFU2_BUILD_ID_LEN];
     static bool have;
     if (!have) {
-        const esp_app_desc_t *d = esp_ota_get_app_description();
+        const esp_app_desc_t *d = bulb_app_desc();
         uint8_t digest[32];
-        mbedtls_sha256_ret((const unsigned char *)d->version, strlen(d->version), digest, 0);
+        BULB_SHA256((const unsigned char *)d->version, strlen(d->version), digest);
         memcpy(cached, digest, PROTO_DFU2_BUILD_ID_LEN);
         have = true;
     }
@@ -203,7 +219,7 @@ static int receive_image(int sock, const esp_partition_t *part,
 
     mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha);
-    mbedtls_sha256_starts_ret(&sha, 0);  // 0 => SHA-256
+    BULB_SHA256_STARTS(&sha);  // SHA-256, not SHA-224
 
     static uint8_t buf[1024];
     uint32_t remaining = image_len;
@@ -221,12 +237,12 @@ static int receive_image(int sock, const esp_partition_t *part,
             esp_ota_end(handle);
             return DFU_ST_OTA_END;
         }
-        mbedtls_sha256_update_ret(&sha, buf, r);
+        BULB_SHA256_UPDATE(&sha, buf, r);
         remaining -= (uint32_t)r;
     }
 
     uint8_t digest[32];
-    mbedtls_sha256_finish_ret(&sha, digest);
+    BULB_SHA256_FINISH(&sha, digest);
     mbedtls_sha256_free(&sha);
 
     if (memcmp(digest, expected_sha, 32) != 0) {
@@ -250,7 +266,8 @@ static int run_pull(uint8_t my_id, const dfu2_params_t *p) {
     int sock = connect_to_server(p);
     if (sock < 0) {
         ESP_LOGE(TAG, "could not reach server %u.%u.%u.%u:%u",
-                 p->server_ip[0], p->server_ip[1], p->server_ip[2], p->server_ip[3],
+                 (unsigned)p->server_ip[0], (unsigned)p->server_ip[1],
+                 (unsigned)p->server_ip[2], (unsigned)p->server_ip[3],
                  (unsigned)p->server_port);
         return DFU_ST_NET;
     }

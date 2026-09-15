@@ -9,6 +9,8 @@
 #include "esp_wifi_types.h"
 #include "esp_log.h"
 
+#include "sdk_compat.h"
+
 #include "config.h"
 #include "bulb_config.h"
 #include "protocol.h"
@@ -57,28 +59,21 @@ static void handle_dfu2(const bulb_parse_result_t *r) {
     controller_notify_dfu2(&p);
 }
 
-// Extract the 802.11 frame length from the RX control metadata. Beacons are
-// sent at legacy rates, so legacy_length is the payload length; fall back to
-// HT_length for HT frames.
-static inline uint32_t frame_length(const wifi_pkt_rx_ctrl_t *rx) {
-    return rx->sig_mode ? (uint32_t)rx->HT_length : (uint32_t)rx->legacy_length;
-}
-
 static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (type != WIFI_PKT_MGMT || buf == NULL) {
         return;
     }
     const wifi_promiscuous_pkt_t *ppkt = (const wifi_promiscuous_pkt_t *)buf;
 
-    // The promiscuous path delivers frames even when the hardware FCS check
-    // failed; rxend_state is nonzero for those. Our vendor IE carries no
-    // checksum of its own, so a frame with a bit error would otherwise be
-    // parsed as-is and can flash the bulb to a wrong color for one update.
-    if (ppkt->rx_ctrl.rxend_state != 0) {
+    // The promiscuous path can deliver frames whose hardware FCS check failed.
+    // Our vendor IE carries no checksum of its own, so a frame with a bit error
+    // would otherwise be parsed as-is and can flash the bulb to a wrong colour
+    // for one update. (Field name differs per SDK -- see sdk_compat.h.)
+    if (bulb_rx_bad(&ppkt->rx_ctrl)) {
         return;
     }
 
-    const uint32_t len = frame_length(&ppkt->rx_ctrl);
+    const uint32_t len = bulb_rx_frame_len(&ppkt->rx_ctrl);
 
     // Read our id live from the config cache (a single atomic byte load) so a
     // SetConfig that rewrites CFG_BULB_ID takes effect on the very next frame
