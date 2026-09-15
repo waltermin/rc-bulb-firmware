@@ -146,7 +146,10 @@ static bool recv_exact(int sock, uint8_t *buf, size_t n) {
 
 // ---- optional rollback guard: record the pending state before we reboot -----
 static void rollback_mark_pending(void) {
-#ifdef DFU_ROLLBACK_GUARD
+#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+    // Native rollback: the bootloader marks the freshly switched image
+    // PENDING_VERIFY on its own, so there is no state for us to record here.
+#elif defined(DFU_ROLLBACK_GUARD)
     const esp_partition_t *running = esp_ota_get_running_partition();
     nvs_handle h;
     if (nvs_open("dfu", NVS_READWRITE, &h) == ESP_OK) {
@@ -382,7 +385,39 @@ void dfu2_start(uint8_t my_id, const dfu2_params_t *params) {
 }
 
 // ---- rollback guard implementation -----------------------------------------
+//
+// Two mechanisms, picked by what the SDK offers.
+//
+// ESP-IDF has real rollback: with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the
+// bootloader marks a newly switched image ESP_OTA_IMG_PENDING_VERIFY and
+// reverts to the previous slot on the next boot unless the app confirms it is
+// healthy. So all we owe it is that confirmation, delayed long enough to prove
+// we really ran. Enabling the Kconfig WITHOUT calling
+// esp_ota_mark_app_valid_cancel_rollback() is worse than not enabling it at
+// all: every OTA would appear to succeed and then silently revert.
+//
+// ESP8266_RTOS_SDK has no such API, hence the hand-rolled NVS boot counter below.
+
 #ifdef DFU_ROLLBACK_GUARD
+
+#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+
+static void rollback_validate_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(DFU_BOOT_VALIDATE_MS));
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    ESP_LOGI(TAG, "image marked valid, rollback cancelled (%s)", esp_err_to_name(err));
+    vTaskDelete(NULL);
+}
+
+// The bootloader already counts failed boots and reverts; nothing to do here.
+void dfu2_rollback_check_on_boot(void) { }
+
+void dfu2_rollback_arm_validation(void) {
+    xTaskCreate(rollback_validate_task, "dfu2_valid", 3072, NULL, 3, NULL);
+}
+
+#else   // ---- ESP8266: manual NVS boot counter ----
 
 static void rollback_validate_task(void *arg) {
     (void)arg;
@@ -439,4 +474,5 @@ void dfu2_rollback_arm_validation(void) {
     xTaskCreate(rollback_validate_task, "dfu2_valid", 2048, NULL, 3, NULL);
 }
 
+#endif  // CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
 #endif  // DFU_ROLLBACK_GUARD
