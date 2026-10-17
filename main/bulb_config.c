@@ -152,7 +152,8 @@ void bulb_config_init(void) {
 
     ESP_LOGI(TAG, "config loaded: id=%u chan=%u curve=%u fallback=%ums",
              s_cache[CFG_BULB_ID].scalar.u8, s_cache[CFG_WIFI_CHANNEL].scalar.u8,
-             s_cache[CFG_DUTY_CURVE].scalar.u8, s_cache[CFG_FALLBACK_MS].scalar.u32);
+             s_cache[CFG_DUTY_CURVE].scalar.u8,
+             (unsigned)s_cache[CFG_FALLBACK_MS].scalar.u32);
 }
 
 uint8_t bulb_config_get_u8(cfg_key_t k) {

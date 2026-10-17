@@ -1,8 +1,14 @@
-// app_main.c — startup ordering and module wiring.
+// app_main.c -- startup ordering and module wiring.
 //
-// Ordering rule #1: light the LEDs before touching the radio. The custom PWM
-// engine runs on the FRC1 hardware timer, which ticks from boot independent of
-// Wi-Fi, so pwm_output_init() produces light immediately — no post-radio re-arm.
+// Ordering rule #1: light the LEDs before touching the radio.
+//
+// How completely that holds depends on the target. On the ESP8266 the engine
+// rides the Wi-Fi TSF counter, which only ticks once the radio is up, so
+// pwm_output_init() can show the default colour as a STATIC level and real
+// modulation waits for pwm_output_start_after_radio(). On the C3 the engine runs
+// on systimer, which ticks from boot, so modulation starts inside
+// pwm_output_init() and the later call is a no-op. Both calls stay in the flow;
+// the timer backend decides which one does the work.
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,9 +20,9 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
-#include "tcpip_adapter.h"
 
 #include "config.h"
+#include "sdk_compat.h"
 #include "pwm_output.h"
 #include "bulb_config.h"
 #include "sniffer.h"
@@ -27,8 +33,9 @@
 static const char *TAG = "app";
 
 static void wifi_init_promiscuous(void) {
-    tcpip_adapter_init();
+    bulb_netif_init();
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    bulb_netif_create_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -78,7 +85,7 @@ void app_main(void) {
     selftest_start();  // no-op unless built with LEMTONE_SELFTEST
 
     ESP_LOGI(TAG, "bulb %d running (fallback %u ms, channel %d)",
-             my_id, bulb_config_get_u32(CFG_FALLBACK_MS),
+             my_id, (unsigned)bulb_config_get_u32(CFG_FALLBACK_MS),
              bulb_config_get_u8(CFG_WIFI_CHANNEL));
 
     // Report this image's build identity: the version string (from version.txt)
@@ -90,7 +97,7 @@ void app_main(void) {
     for (int i = 0; i < PROTO_DFU2_BUILD_ID_LEN; i++) {
         snprintf(bidhex + i * 2, 3, "%02x", bid[i]);
     }
-    ESP_LOGI(TAG, "build %s (id %s)", esp_ota_get_app_description()->version, bidhex);
+    ESP_LOGI(TAG, "build %s (id %s)", bulb_app_desc()->version, bidhex);
 
 #ifdef DFU_ROLLBACK_GUARD
     // 6. We reached a healthy running state; arm validation so this image is

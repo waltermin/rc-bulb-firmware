@@ -141,7 +141,7 @@ static void controller_task(void *arg) {
                 // the RX callback. Does not affect the fallback timer.
                 esp_err_t err = bulb_config_set_raw(msg.u.cfg.key, msg.u.cfg.value, msg.u.cfg.len);
                 ESP_LOGI(TAG, "set config key 0x%04x (%u bytes) (err=%d)",
-                         msg.u.cfg.key, msg.u.cfg.len, err);
+                         (unsigned)msg.u.cfg.key, (unsigned)msg.u.cfg.len, (int)err);
                 // If a default-color channel changed and we're currently resting
                 // at the default, repaint now so the new default takes effect
                 // instantly instead of waiting for the next fallback timeout. If a
@@ -196,7 +196,8 @@ static void controller_task(void *arg) {
             const uint32_t fallback_ms = bulb_config_get_u32(CFG_FALLBACK_MS);
             TickType_t now = xTaskGetTickCount();
             if ((now - last_seen) >= pdMS_TO_TICKS(fallback_ms)) {
-                ESP_LOGI(TAG, "no update in %u ms; reverting to default color", fallback_ms);
+                ESP_LOGI(TAG, "no update in %u ms; reverting to default color",
+                         (unsigned)fallback_ms);
                 pwm_output_set_default();
                 at_default = true;
                 s_lt_stats.fallbacks++;

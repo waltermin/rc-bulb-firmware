@@ -1,0 +1,17 @@
+# 4 MB two-OTA table for the ESP32-C3 board.
+#
+# The C3 has a flash MMU that maps arbitrarily, so the ESP8266 rule that an app
+# partition must sit inside a single 1 MB XIP-mappable block does not apply --
+# the slots can be as large as the flash allows. They are, because an ESP-IDF
+# Wi-Fi app is roughly twice the size of the ESP8266 one (~800 KB vs ~457 KB) and
+# the old 960 KB slots would leave little headroom.
+#
+# App partitions must start on a 64 KB boundary. nvs holds the bulb id and config
+# and sits outside both slots, so it survives updates.
+#
+# Name,     Type, SubType, Offset,    Size
+nvs,        data, nvs,     0x9000,    0x6000
+otadata,    data, ota,     0xf000,    0x2000
+phy_init,   data, phy,     0x11000,   0x1000
+ota_0,      app,  ota_0,   0x20000,   0x1E0000
+ota_1,      app,  ota_1,   0x200000,  0x1E0000

@@ -30,3 +30,10 @@ __pycache__/
 
 dfu_fleet_state.json
 dfu2_state.json
+
+# per-device build dirs / generated sdkconfigs
+/build-*/
+sdkconfig.*
+!sdkconfig.defaults*
+# DFU2 server progress state (per rollout, contains IPs)
+dfu2_state*.json

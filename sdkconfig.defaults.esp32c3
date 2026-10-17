@@ -1,0 +1,26 @@
+# ESP32-C3 overrides, applied on top of sdkconfig.defaults.
+# IDF reads sdkconfig.defaults then sdkconfig.defaults.<target>, so these win.
+
+CONFIG_IDF_TARGET="esp32c3"
+
+# The DOUT choice in the base file exists only for the ESPHome->RTOS in-place
+# bootloader migration on the ESP8266; none of that applies here.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_c3.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_c3.csv"
+
+# Console on UART0 (GPIO20/21). The C3's USB-serial-JTAG is not wired on this
+# board -- the S3 bridge talks to UART0.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# The PWM engine's cycle/tick reasoning assumes a fixed 160 MHz core.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# ESP-IDF has the native rollback the ESP8266 SDK lacks, so DFU_ROLLBACK_GUARD's
+# manual NVS boot counter is unnecessary here (see dfu2.c).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

@@ -1,5 +1,5 @@
 # Top-level project file for the ESP8266_RTOS_SDK (CMake / idf.py) build.
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.16)
 
 # The Lemtone solver lives in lemtone/ (a standalone module with its own host and
 # wasm builds); pull it in as a component.
