@@ -8,12 +8,15 @@ all: test_protocol test_pwm_schedule
 
 # The 0x01 LightUpdate is compile-time gated by PROTO_ENABLE_LEGACY_LIGHT_UPDATE.
 # Exercise both settings: legacy on (legacy + new packet tests) and legacy off
-# (0x01 rejected + new packet tests).
+# (0x01 rejected + new packet tests). The DFU2 device type is per device: build the
+# parser as a bulb (0x01) and as a panel (0x03).
 test_protocol: test_protocol.c ../main/protocol.c ../main/protocol.h
 	$(CC) $(CFLAGS) -DPROTO_ENABLE_LEGACY_LIGHT_UPDATE=1 test_protocol.c ../main/protocol.c -lm -o test_protocol_legacy
 	./test_protocol_legacy
 	$(CC) $(CFLAGS) -DPROTO_ENABLE_LEGACY_LIGHT_UPDATE=0 test_protocol.c ../main/protocol.c -lm -o test_protocol_nolegacy
 	./test_protocol_nolegacy
+	$(CC) $(CFLAGS) -DPROTO_DEVICE_TYPE=0x03 test_protocol.c ../main/protocol.c -lm -o test_protocol_panel
+	./test_protocol_panel
 
 # The PWM schedule compiler is pure integer/float math (no SDK).
 test_pwm_schedule: test_pwm_schedule.c ../main/pwm_schedule.c ../main/pwm_schedule.h ../main/config.h
@@ -22,5 +25,5 @@ test_pwm_schedule: test_pwm_schedule.c ../main/pwm_schedule.c ../main/pwm_schedu
 
 .PHONY: clean
 clean:
-	rm -f test_protocol test_protocol_legacy test_protocol_nolegacy \
+	rm -f test_protocol test_protocol_legacy test_protocol_nolegacy test_protocol_panel \
 	      test_pwm_schedule test_pwm_schedule_bin *.exe *.obj

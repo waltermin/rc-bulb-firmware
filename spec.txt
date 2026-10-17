@@ -120,16 +120,29 @@ re-evaluates every broadcast (so one that missed the first packet, or just
 rebooted, still acts on a later identical one). Idempotency comes from the
 build-id comparison, not from a sequence gate.
 
-When an in-range bulb receives a Dfu2Request whose `build_id` differs from its
-own, it leaves promiscuous mode, joins the Wi-Fi network named by `ssid` /
-`pass`, connects over TCP to `server_ip`:`server_port`, and pulls the new image
-into its inactive OTA slot (see the DFU2 transfer protocol below). If the
-build ids match, the bulb ignores the request (it is already running the target
-build), which makes a rollout self-terminating.
+`device_type` selects which kind of device the request targets; a device
+ignores requests for any type other than its own. Defined types:
+
+    0x01  KAUF bulb (ESP8266)
+    0x02  Tuya relay switch (BK7238, T1-2S-NL)
+    0x03  panel ESPs
+
+(This field was formerly `fmt_version`, which was always 0x01. Deployed bulbs
+validate the byte as 0x01 and so already implement the new rule — 0x01 now
+means "bulb". Format changes are expressed as new packet tags, not version
+bumps, so the version field was redundant.)
+
+When an in-range device of the matching type receives a Dfu2Request whose
+`build_id` differs from its own, it leaves promiscuous mode, joins the Wi-Fi
+network named by `ssid` / `pass`, connects over TCP to
+`server_ip`:`server_port`, and pulls the new image into its inactive OTA slot
+(see the DFU2 transfer protocol below). If the build ids match, the device
+ignores the request (it is already running the target build), which makes a
+rollout self-terminating.
 
 ```
 struct Dfu2RequestPacket {
-    fmt_version: u8,       // packet format version, currently 0x01
+    device_type: u8,       // device type this request targets (see above)
 
     bulb_id_start: u8,     // start of the addressed id range
     bulb_id_bounds: u8,    // range extends by this many ids (0 => only bulb_id_start)

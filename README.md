@@ -141,23 +141,29 @@ needed.
 
 Each build carries a unique **build id**: `build.ps1` / `build.sh` write a random token to
 `version.txt`, the SDK stamps it into the app descriptor (`esp_app_desc.version`),
-and both the bulb and the update server derive the 8-byte wire id as
+and both the device and the update server derive the 8-byte wire id as
 `sha256(version)[:8]`. (The ESP8266 toolchain does not populate `app_elf_sha256`,
 so we hash the version string instead.)
 
-Rollout flow (ESP8266_RTOS_SDK has **no** native app-rollback API):
+Every request names a **device type** (`0x01` bulb, `0x02` relay switch, `0x03`
+panel) and only that kind of device acts on it; ids are one space shared by every
+type. Each image answers only its own type (`DEVICE_TYPE` in
+`devices/<device>/device.cmake`).
 
-1. Start the update server with the image; it prints the build id and a
-   ready-to-paste base-station command:
+Rollout flow:
+
+1. Start the update server with the image and its device. It checks the image's
+   project name against the device (a bulb image cannot be served as a panel image,
+   or the reverse) and prints the build id and a ready-to-paste base-station command:
    ```sh
-   python3 tools/dfu2_server.py build-bulb/bulb-firmware.bin --range 1-100 \
-       --ssid "RC-Update" --pass "swordfish"
-   #  -> dfu2 1 100 RC-Update swordfish 192.168.4.2 3333 <build_id_hex>
+   python3 tools/dfu2_server.py build-bulb/bulb-firmware.bin --device bulb \
+       --range 1-100 --ssid "RC-Update" --pass "swordfish"
+   #  -> dfu2 bulb 1 100 RC-Update swordfish 192.168.4.2 3333 <build_id_hex>
    ```
 2. Paste that on the base station. It broadcasts a `0x05 Dfu2Request` beacon
-   continuously (id range + AP creds + server IP/port + target build id) until
-   `dfu2 off` / `stop`.
-3. A bulb in range whose own build id differs leaves promiscuous mode, joins the
+   continuously (device type + id range + AP creds + server IP/port + target build
+   id) until `dfu2 off` / `stop`.
+3. A device of that type in range whose own build id differs leaves promiscuous mode, joins the
    advertised AP (DHCP hostname `rc_light_dfu_<id>`), connects **out** to the
    server, and sends a hello (`magic | fmt | bulb_id | build_id[8]`).
 4. The server replies with a 49-byte header
@@ -172,9 +178,23 @@ Rollout flow (ESP8266_RTOS_SDK has **no** native app-rollback API):
    request, so it ignores it — the rollout is idempotent and self-terminating. A
    bulb that fails at any step reboots into its untouched current firmware and
    retries on the next broadcast it hears.
-7. Optional NVS **boot-counter rollback guard** (`DFU_ROLLBACK_GUARD`): a fresh
-   image must run healthy for `DFU_BOOT_VALIDATE_MS`, or the bootloader is pointed
-   back at the previous slot after `DFU_BOOT_FAIL_THRESHOLD` failed boots.
+7. Rollback guard (`DFU_ROLLBACK_GUARD`): a fresh image must run healthy for
+   `DFU_BOOT_VALIDATE_MS`. On the bulb (ESP8266_RTOS_SDK has no native rollback) an
+   NVS boot counter points the bootloader back at the previous slot after
+   `DFU_BOOT_FAIL_THRESHOLD` failed boots; on the panel ESP-IDF's native rollback
+   reverts unless the image confirms itself.
+
+**Panels on the pre-mainline c3-port firmware** still answer only type `0x01`. The
+one-off update that brings them onto this firmware is therefore advertised as a
+bulb request, to the panels' id range only:
+
+```sh
+python3 tools/dfu2_server.py build-panel/panel-firmware.bin --device panel \
+    --advertise-as bulb --range <panel ids> --ssid ... --pass ...
+#  -> dfu2 bulb <panel ids> ...   (never include real bulb ids in that range)
+```
+
+From then on, panels take `dfu2 panel ...` requests and ignore bulb rollouts.
 
 The server tracks each bulb's connection, progress, and result plus the overall
 rollout (mirrored to `dfu2_state.json`).

@@ -300,23 +300,26 @@ static bulb_parse_result_t parse_lemtone_update(const uint8_t *pkt, size_t pkt_l
     return out;
 }
 
-// 0x05 Dfu2Request: [tag, fmt, start, bounds, ip(4), port(u16), build_id(len+n),
-// ssid(len+n), pass(len+n)]. Sets dfu2_requested only when my_id is in
-// [start, start+bounds]; every field is length-checked against pkt_len before it
-// is read, and the string/build-id pointers alias `pkt` (copy before reuse).
+// 0x05 Dfu2Request: [tag, device_type, start, bounds, ip(4), port(u16),
+// build_id(len+n), ssid(len+n), pass(len+n)]. Sets dfu2_requested only when the
+// request is for our device type and my_id is in [start, start+bounds]; every field
+// is length-checked against pkt_len before it is read, and the string/build-id
+// pointers alias `pkt` (copy before reuse).
 static bulb_parse_result_t parse_dfu2_request(const uint8_t *pkt, size_t pkt_len,
                                               uint8_t my_id) {
     if (pkt_len < PROTO_DFU2_FIXED_SIZE) {
         return INVALID;
-    }
-    if (pkt[1] != PROTO_DFU2_FMT_VERSION) {
-        return INVALID;  // unknown format version
     }
     const uint8_t start = pkt[2];
     const uint8_t bounds = pkt[3];
 
     bulb_parse_result_t out = INVALID;
     out.valid = true;
+
+    // Another kind of device's update: a well-formed frame, but nothing for us.
+    if (pkt[1] != PROTO_DEVICE_TYPE) {
+        return out;
+    }
 
     // Addressing: inclusive range [start, start + bounds], 32-bit to avoid u8
     // wraparound. Not for us -> valid frame, no request (nothing else to decode).

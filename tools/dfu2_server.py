@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """DFU2 pull-based update server.
 
-The base station broadcasts a `dfu2` request (id range + AP creds + this server's
-IP/port + the target build id). Each bulb in range whose own build id differs
-joins the AP and connects OUT to THIS server, which serves the firmware image and
-tracks per-bulb progress and the overall rollout.
+The base station broadcasts a `dfu2` request (device type + id range + AP creds +
+this server's IP/port + the target build id). Each device of that type in range
+whose own build id differs joins the AP and connects OUT to THIS server, which
+serves the firmware image and tracks per-device progress and the overall rollout.
 
-    python3 tools/dfu2_server.py build/bulb-firmware.bin --range 1-100 \
-        --ssid "RC-Update" --pass "swordfish"
+    python3 tools/dfu2_server.py build-bulb/bulb-firmware.bin --device bulb \
+        --range 1-100 --ssid "RC-Update" --pass "swordfish"
+    python3 tools/dfu2_server.py build-panel/panel-firmware.bin --device panel --range 80-89 ...
 
-On start it prints the image's build id (the first 8 bytes of the ELF-SHA256 the
-toolchain stamps into the app descriptor) and a ready-to-paste base-station
-command, e.g.:
+--device (required) names a device in devices/: the image's project name must match
+that device's DEVICE_PROJECT (so a bulb image can never be advertised to panels, or
+the reverse), and the printed command carries its DFU2 device type. On start it
+prints the image's build id (sha256 of the app-descriptor version string, first 8
+bytes) and a ready-to-paste base-station command, e.g.:
 
-    dfu2 1 100 RC-Update swordfish 192.168.4.2 3333 deadbeef01020304
+    dfu2 bulb 1 100 RC-Update swordfish 192.168.4.2 3333 deadbeef01020304
+
+--advertise-as <device> prints a different device type in that command than the
+image's own. Its one use: panels flashed with the pre-mainline c3-port firmware
+still only answer type 0x01 (bulb), so the update that brings them onto mainline is
+advertised as `bulb` to the panels' id range ONLY (never a range with real bulbs in
+it: a bulb would pull the panel image).
 
 Wire protocol (little-endian), inverse of the old push DFU:
   * bulb -> server hello:  magic u32 | fmt u8 | bulb_id u8 | build_id[8]   (14 B)
@@ -27,6 +36,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -301,10 +311,30 @@ class Server:
                     return 0
 
 
+DEVICES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "devices")
+
+
+def device_settings(name):
+    """DEVICE_* settings from devices/<name>/device.cmake (the build's source of truth)."""
+    out = {}
+    for line in open(os.path.join(DEVICES_DIR, name, "device.cmake"), encoding="utf-8"):
+        m = re.match(r"\s*set\((DEVICE_\w+)\s+([^\s)]+)", line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
 def main():
+    devices = sorted(d for d in os.listdir(DEVICES_DIR)
+                     if os.path.isfile(os.path.join(DEVICES_DIR, d, "device.cmake")))
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image", help="firmware .bin to serve")
+    ap.add_argument("--device", required=True, choices=devices,
+                    help="device the image is for (checked against the image; sets the dfu2 type)")
+    ap.add_argument("--advertise-as", choices=devices, default=None,
+                    help="print this device's type instead (one-off migration of c3-port panels: "
+                         "--device panel --advertise-as bulb, panel ids only)")
     ap.add_argument("--range", required=True,
                     help="bulb id range for overall progress, e.g. 1-100 or 1-10,20")
     ap.add_argument("--host", default="0.0.0.0", help="bind address")
@@ -330,6 +360,11 @@ def main():
         sys.exit("image is empty")
 
     build_id = extract_build_id(data)
+    dev = device_settings(args.device)
+    project = getattr(extract_build_id, "project", None)
+    if project != dev["DEVICE_PROJECT"]:
+        sys.exit(f"image project {project!r} is not a {args.device} image "
+                 f"(expected {dev['DEVICE_PROJECT']!r}); refusing to serve it")
     ids = parse_range(args.range)
     ip = args.advertise_ip or local_ip()
     lo, hi = ids[0], ids[-1]
@@ -340,7 +375,16 @@ def main():
     print(f"build  : {build_id.hex()}  (= sha256(version)[:8])")
     print(f"serving: {ip}:{args.port}  for bulb ids {lo}..{hi} ({len(ids)} bulbs)")
     print("\nPaste this on the base station (adjust the SSID/password if needed):\n")
-    print(f"    dfu2 {lo} {hi} {args.ssid} {args.passwd} {ip} {args.port} {build_id.hex()}\n")
+    as_dev = args.advertise_as or args.device
+    as_type = device_settings(as_dev)["DEVICE_TYPE"]
+    ssid = f'"{args.ssid}"' if " " in args.ssid else args.ssid
+    print(f"    dfu2 {as_dev} {lo} {hi} {ssid} {args.passwd} {ip} {args.port} {build_id.hex()}\n")
+    if as_dev == args.device:
+        print(f"  (device type {as_type}: only {args.device}s in range will act)\n")
+    else:
+        print(f"  WARNING: a {args.device} image advertised with the {as_dev} type ({as_type}).\n"
+              f"  Every {as_dev} in {lo}..{hi} whose build differs will pull it. Make sure the\n"
+              f"  range holds only {args.device}s that still answer {as_type}.\n")
 
     srv = Server(data, build_id, ids, args)
     try:

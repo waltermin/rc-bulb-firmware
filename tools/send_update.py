@@ -56,7 +56,7 @@ TAG_PRECISE_LIGHT_UPDATE = 0x02
 TAG_DFU2_REQUEST = 0x05
 TAG_RAW_LIGHT_UPDATE = 0x06
 CTRL_FLAG_DFU = 0x01
-DFU2_FMT_VERSION = 0x01
+DFU2_DEVICE_TYPES = {"bulb": 0x01, "switch": 0x02, "panel": 0x03}  # Dfu2Request device_type
 DFU2_BUILD_ID_LEN = 8
 DFU2_MAX_BODY = 70   # ESP8266 promiscuous <128B frame limit (PROTO_DFU2_MAX_BODY)
 MAX_ENTRIES = 11
@@ -130,8 +130,9 @@ def build_light_update(entries, control_flags, control_data):
     return build_frame_from_body(body)
 
 
-def build_dfu2(spec):
-    """spec = [RANGE, SSID, PASS, IP, PORT, BUILD_ID_HEX] -> Dfu2Request (0x05).
+def build_dfu2(spec, device="bulb"):
+    """spec = [RANGE, SSID, PASS, IP, PORT, BUILD_ID_HEX] -> Dfu2Request (0x05) for one
+    device type (only that kind of device acts on it).
 
     RANGE is 'start-last' or a single id; BUILD_ID_HEX is DFU2_BUILD_ID_LEN bytes
     of hex. Rejects (raises) if the body would exceed the ESP8266-deliverable size.
@@ -160,7 +161,7 @@ def build_dfu2(spec):
 
     s = ssid.encode()
     p = passwd.encode()
-    body = (bytes([TAG_DFU2_REQUEST, DFU2_FMT_VERSION, start, bounds]) + ipb
+    body = (bytes([TAG_DFU2_REQUEST, DFU2_DEVICE_TYPES[device], start, bounds]) + ipb
             + struct.pack("<H", portn)
             + bytes([len(build)]) + build
             + bytes([len(s)]) + s
@@ -187,6 +188,8 @@ def main():
     ap.add_argument("--dfu2", nargs=6, default=None,
                     metavar=("RANGE", "SSID", "PASS", "IP", "PORT", "BUILD_ID_HEX"),
                     help="Dfu2Request (0x05) pull-based OTA advert; RANGE is 'a-b' or 'n'")
+    ap.add_argument("--dfu2-device", default="bulb", choices=sorted(DFU2_DEVICE_TYPES),
+                    help="device type the --dfu2 request targets (default bulb)")
     ap.add_argument("--interval", type=float, default=0.5, help="seconds between frames")
     ap.add_argument("--count", type=int, default=0, help="frames to send (0 = forever)")
     args = ap.parse_args()
@@ -202,7 +205,7 @@ def main():
 
     if args.dfu2 is not None:
         try:
-            frame = build_dfu2(args.dfu2)
+            frame = build_dfu2(args.dfu2, args.dfu2_device)
         except ValueError as e:
             ap.error(str(e))
         desc = f"dfu2 range={args.dfu2[0]} build={args.dfu2[5]}"

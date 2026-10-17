@@ -172,7 +172,7 @@ static size_t build_cmd_frame(uint8_t *out, uint32_t seq, uint8_t start, uint8_t
 
 // Build a beacon carrying a Dfu2Request (0x05). `build_id`/`ssid`/`pass` are
 // raw byte fields; pass build_id_len etc. so truncation/overrun can be tested.
-static size_t build_dfu2_frame(uint8_t *out, uint8_t fmt, uint8_t start, uint8_t bounds,
+static size_t build_dfu2_frame(uint8_t *out, uint8_t device_type, uint8_t start, uint8_t bounds,
                                const uint8_t ip[4], uint16_t port,
                                const uint8_t *build_id, uint8_t build_id_len,
                                const uint8_t *ssid, uint8_t ssid_len,
@@ -180,7 +180,7 @@ static size_t build_dfu2_frame(uint8_t *out, uint8_t fmt, uint8_t start, uint8_t
     uint8_t pkt[128];
     size_t m = 0;
     pkt[m++] = PROTO_TAG_DFU2_REQUEST;
-    pkt[m++] = fmt;
+    pkt[m++] = device_type;
     pkt[m++] = start;
     pkt[m++] = bounds;
     pkt[m++] = ip[0]; pkt[m++] = ip[1]; pkt[m++] = ip[2]; pkt[m++] = ip[3];
@@ -598,7 +598,7 @@ int main(void) {
 
         // --- Dfu2Request addressed to us (bounds 0): all fields decoded ---
         {
-            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+            size_t len = build_dfu2_frame(buf, PROTO_DEVICE_TYPE, MY_ID, 0, ip, 3333,
                                           bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
                                           pass, (uint8_t)strlen((const char *)pass));
             bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
@@ -617,7 +617,7 @@ int main(void) {
 
         // --- Dfu2Request addressed by a range covering us ---
         {
-            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID - 2, 5, ip, 3333,
+            size_t len = build_dfu2_frame(buf, PROTO_DEVICE_TYPE, MY_ID - 2, 5, ip, 3333,
                                           bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
                                           pass, (uint8_t)strlen((const char *)pass));
             bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
@@ -627,7 +627,7 @@ int main(void) {
 
         // --- Dfu2Request not addressed to us: valid frame, no request ---
         {
-            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID + 1, 0, ip, 3333,
+            size_t len = build_dfu2_frame(buf, PROTO_DEVICE_TYPE, MY_ID + 1, 0, ip, 3333,
                                           bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
                                           pass, (uint8_t)strlen((const char *)pass));
             bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
@@ -638,7 +638,7 @@ int main(void) {
 
         // --- open network (empty password) is accepted ---
         {
-            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+            size_t len = build_dfu2_frame(buf, PROTO_DEVICE_TYPE, MY_ID, 0, ip, 3333,
                                           bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
                                           pass, 0);
             bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
@@ -647,20 +647,27 @@ int main(void) {
             CHECK(r.dfu2.pass_len == 0);
         }
 
-        // --- wrong format version is rejected ---
+        // --- device type: only requests for our own type are acted on; the others
+        //     are well-formed frames with nothing for us (the relay switch and the
+        //     panel share the id space with bulbs) ---
         {
-            size_t len = build_dfu2_frame(buf, 0x02, MY_ID, 0, ip, 3333,
-                                          bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
-                                          pass, (uint8_t)strlen((const char *)pass));
-            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
-            printf("dfu2 bad fmt:\n");
-            CHECK(!r.valid);
+            const uint8_t types[] = {PROTO_DEVICE_TYPE_BULB, PROTO_DEVICE_TYPE_RELAY,
+                                     PROTO_DEVICE_TYPE_PANEL, 0x00, 0xFF};
+            printf("dfu2 device type (built as 0x%02x):\n", (unsigned)PROTO_DEVICE_TYPE);
+            for (size_t k = 0; k < sizeof types; k++) {
+                size_t len = build_dfu2_frame(buf, types[k], MY_ID, 0, ip, 3333,
+                                              bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
+                                              pass, (uint8_t)strlen((const char *)pass));
+                bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+                CHECK(r.valid);
+                CHECK(r.dfu2_requested == (types[k] == PROTO_DEVICE_TYPE));
+            }
         }
 
         // --- build_id length over our max is rejected ---
         {
             const uint8_t bid9[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
-            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+            size_t len = build_dfu2_frame(buf, PROTO_DEVICE_TYPE, MY_ID, 0, ip, 3333,
                                           bid9, 9, ssid, (uint8_t)strlen((const char *)ssid),
                                           pass, (uint8_t)strlen((const char *)pass));
             bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
@@ -670,7 +677,7 @@ int main(void) {
 
         // --- ssid length prefix overruns the packet: rejected ---
         {
-            size_t len = build_dfu2_frame(buf, PROTO_DFU2_FMT_VERSION, MY_ID, 0, ip, 3333,
+            size_t len = build_dfu2_frame(buf, PROTO_DEVICE_TYPE, MY_ID, 0, ip, 3333,
                                           bid, 8, ssid, (uint8_t)strlen((const char *)ssid),
                                           pass, (uint8_t)strlen((const char *)pass));
             // Bump the ssid_len byte so it claims more bytes than remain. Layout in
@@ -685,7 +692,7 @@ int main(void) {
         // --- truncated before the build_id length byte: rejected ---
         {
             uint8_t pkt[PROTO_DFU2_FIXED_SIZE] = {
-                PROTO_TAG_DFU2_REQUEST, PROTO_DFU2_FMT_VERSION, MY_ID, 0,
+                PROTO_TAG_DFU2_REQUEST, PROTO_DEVICE_TYPE, MY_ID, 0,
                 192, 168, 4, 1, 0x05, 0x0D,  // ip + port(3333)
             };
             size_t len = wrap_beacon(buf, pkt, sizeof(pkt));  // no build_id/ssid/pass
@@ -695,10 +702,8 @@ int main(void) {
         }
     }
 
-
     // ===================== 0x07 LemtoneUpdate =====================
     {
-        uint8_t buf[256];
 
         // --- golden entry from the tool page's independent JS encoder (2700K, 300 lm, F1):
         //     id 7, bytes 73 84 72 49 ff = codes a 1139 b 1616 lum 3365 F 63 ---

@@ -63,12 +63,14 @@
 //   The seq gate ("highest seq since power-on") is stateful and handled by the
 //   caller (the sniffer), not this pure parser: parse exposes seq + is_command.
 //
-//   0x05 Dfu2Request — pull-based OTA: advertise an update for an id range. A bulb
-//        in range whose own build id differs from the advertised one connects OUT
-//        to the given server and pulls the image (see dfu2.*).
+//   0x05 Dfu2Request — pull-based OTA: advertise an update for an id range and one
+//        device type. A device of that type in range whose own build id differs
+//        from the advertised one connects OUT to the given server and pulls the
+//        image (see dfu2.*).
 //     struct Dfu2RequestPacket {
 //       u8  packet_tag;     // 0x05
-//       u8  fmt_version;    // 0x01
+//       u8  device_type;    // PROTO_DEVICE_TYPE_*; only that kind of device acts
+//                           // (formerly fmt_version, always 0x01 = bulb)
 //       u8  id_start;       // addressed to ids [start, start + bounds] inclusive
 //       u8  id_bounds;      // 0 => only id_start
 //       u8  server_ip[4];   // IPv4, dotted-order octets (a.b.c.d)
@@ -211,9 +213,21 @@ extern "C" {
 #define PROTO_CONFIG_VALUE_MAX 64u       // largest config value we accept (bounds RX buffers)
 
 // Dfu2Request (0x05). Fixed header before the variable length-prefixed fields:
-// tag + fmt + start + bounds + server_ip(4) + server_port(2) = 10 bytes.
+// tag + device_type + start + bounds + server_ip(4) + server_port(2) = 10 bytes.
 #define PROTO_DFU2_FIXED_SIZE 10u
-#define PROTO_DFU2_FMT_VERSION 0x01u
+
+// Dfu2Request device types (the byte after the tag, formerly fmt_version). Device
+// ids are one space shared by every type, so the type is what keeps a rollout for
+// one product off another product's hardware.
+#define PROTO_DEVICE_TYPE_BULB 0x01u    // KAUF RGBWW bulb (ESP8266)
+#define PROTO_DEVICE_TYPE_RELAY 0x02u   // relay switch (separate firmware)
+#define PROTO_DEVICE_TYPE_PANEL 0x03u   // panel light (ESP32-C3)
+
+// The type this image answers. Set per device by the build (devices/<device>/
+// device.cmake -> main/CMakeLists); host tests build the parser once per type.
+#ifndef PROTO_DEVICE_TYPE
+#define PROTO_DEVICE_TYPE PROTO_DEVICE_TYPE_BULB
+#endif
 #define PROTO_DFU2_BUILD_ID_LEN 8u       // advertised/compared ELF-SHA256 prefix length
 #define PROTO_DFU2_SSID_MAX 32u          // max SSID bytes
 #define PROTO_DFU2_PASS_MAX 63u          // max WPA2 passphrase bytes
@@ -266,7 +280,7 @@ typedef struct {
     const uint8_t *config_value; // -> value bytes within `frame`; copy before reuse
 
     // Dfu2Request (0x05) fields. dfu2_requested is set only when the request is
-    // addressed to my_id; the pointers alias `frame`, so copy them before the RX
+    // for this device type (PROTO_DEVICE_TYPE) and addressed to my_id; the pointers alias `frame`, so copy them before the RX
     // buffer is reused (same rule as config_value). The caller still decides
     // whether to act by comparing build_id to its own running build id.
     bool     dfu2_requested;
