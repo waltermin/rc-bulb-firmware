@@ -16,6 +16,8 @@
 #include "sniffer.h"
 #include "dfu2.h"
 #include "esp_system.h"  // esp_restart
+#include "esp_timer.h"   // esp_timer_get_time (Lemtone timing log)
+#include "lemtone.h"
 
 static const char *TAG = "controller";
 
@@ -25,6 +27,8 @@ typedef enum {
     MSG_SET_CONFIG = 2,
     MSG_REBOOT = 3,
     MSG_APPLY_RAW = 4,
+    MSG_APPLY_LEMTONE = 5,
+    MSG_KEEPALIVE = 6,
 } ctrl_msg_type_t;
 
 typedef struct {
@@ -38,6 +42,9 @@ typedef struct {
             uint8_t pr, pg, pb, pww, pcw;    // per-channel PWM period, log2(ticks)
         } raw;                      // MSG_APPLY_RAW
         struct {
+            float a, b, lm, f;      // decoded Lemtone value (MSG_APPLY_LEMTONE)
+        } lemtone;
+        struct {
             uint16_t key;
             uint8_t  len;
             uint8_t  value[PROTO_CONFIG_VALUE_MAX];
@@ -47,6 +54,49 @@ typedef struct {
 } ctrl_msg_t;
 
 static QueueHandle_t s_queue;
+
+// Lemtone solver context: built once from the compiled-in model, read-only after.
+static lemtone_ctx_t s_lemtone;
+static controller_lemtone_stats_t s_lt_stats = {.min_stack_free = UINT32_MAX};
+
+void controller_get_lemtone_stats(controller_lemtone_stats_t *out) {
+    *out = s_lt_stats;
+}
+
+// Solve a Lemtone value and drive the PWM with the result. The solver output is
+// already capped at the model's duty_max and quantized to whole ticks per period, so
+// it goes through the raw path (no curve, no extra cap); pwm_compile turns each
+// cmd_duty back into exactly the solver's tick count.
+static void apply_lemtone(float a, float b, float lm, float f) {
+    const int64_t t0 = esp_timer_get_time();
+    lemtone_solution_t sol;
+    lemtone_pwm_t pwm;
+    lemtone_compute(&s_lemtone, &LEMTONE_PERIOD_DEFAULT, a, b, lm, f, &sol, &pwm);
+    const int64_t t1 = esp_timer_get_time();
+    pwm_output_set_raw(pwm.cmd_duty, pwm.period_log2);
+    const int64_t t2 = esp_timer_get_time();
+
+    controller_lemtone_stats_t *st = &s_lt_stats;
+    st->applies++;
+    st->last_mode = sol.mode;
+    st->last_evals = sol.evals;
+    st->last_solve_us = (uint32_t)(t1 - t0);
+    st->last_pwm_us = (uint32_t)(t2 - t1);
+    if (st->last_solve_us > st->max_solve_us) st->max_solve_us = st->last_solve_us;
+    if (st->last_pwm_us > st->max_pwm_us) st->max_pwm_us = st->last_pwm_us;
+    const uint32_t free_b = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+    if (free_b < st->min_stack_free) st->min_stack_free = free_b;
+#if LEMTONE_TIMING_LOG
+    // integers only: mlm = millilumens, desat in 0.1% (no float printf on this libc)
+    ESP_LOGI(TAG, "lemtone mode %u evals %u solve %d us pwm %d us | %u mlm desat %u/1000 | "
+             "ticks %u %u %u %u %u @2^%u %u %u %u %u | stack free %u B",
+             sol.mode, sol.evals, (int)(t1 - t0), (int)(t2 - t1),
+             (unsigned)(sol.lm * 1000.0f), (unsigned)(sol.desat * 1000.0f),
+             pwm.ticks[0], pwm.ticks[1], pwm.ticks[2], pwm.ticks[3], pwm.ticks[4],
+             pwm.period_log2[0], pwm.period_log2[1], pwm.period_log2[2], pwm.period_log2[3],
+             pwm.period_log2[4], (unsigned)uxTaskGetStackHighWaterMark(NULL));
+#endif
+}
 
 // True if a SetConfig wire tag names one of the default/fallback color channels.
 // A write to any of these changes the color the bulb shows while idle, so it is
@@ -108,6 +158,17 @@ static void controller_task(void *arg) {
                 if (err == ESP_OK && msg.u.cfg.key == CFG_TAG_WIFI_CHANNEL) {
                     sniffer_apply_channel(bulb_config_get_u8(CFG_WIFI_CHANNEL));
                 }
+            } else if (msg.type == MSG_APPLY_LEMTONE) {
+                apply_lemtone(msg.u.lemtone.a, msg.u.lemtone.b, msg.u.lemtone.lm, msg.u.lemtone.f);
+                last_seen = xTaskGetTickCount();
+                at_default = false;
+            } else if (msg.type == MSG_KEEPALIVE) {
+                // An unchanged repeat of what we show: only the fallback timer moves.
+                // Once at the default, the sniffer has been told to re-apply its next
+                // entry, so a stale keep-alive must not hold off nothing.
+                if (!at_default) {
+                    last_seen = xTaskGetTickCount();
+                }
             } else if (msg.type == MSG_APPLY_RAW) {
                 // MSG_APPLY_RAW — raw duties (clamp-only, no curve/cap) plus a
                 // per-channel PWM period. Arrays are in COLOR_* order R,G,B,WW,CW.
@@ -138,38 +199,60 @@ static void controller_task(void *arg) {
                 ESP_LOGI(TAG, "no update in %u ms; reverting to default color", fallback_ms);
                 pwm_output_set_default();
                 at_default = true;
+                s_lt_stats.fallbacks++;
+                // The sniffer drops Lemtone repeats; the next one must repaint.
+                sniffer_forget_lemtone();
             }
         }
     }
 }
 
 void controller_start(void) {
+    lemtone_init(&s_lemtone, &LEMTONE_MODEL_DEFAULT);
+    ESP_LOGI(TAG, "lemtone model %s", s_lemtone.m->id);
     s_queue = xQueueCreate(8, sizeof(ctrl_msg_t));
     configASSERT(s_queue != NULL);
     xTaskCreate(controller_task, "controller", 4096, NULL, 5, NULL);
 }
 
-void controller_notify_entry(float r, float g, float b, float ww, float cw) {
+bool controller_notify_entry(float r, float g, float b, float ww, float cw) {
     if (s_queue == NULL) {
-        return;
+        return false;
     }
     ctrl_msg_t msg = {.type = MSG_APPLY,
                       .u.color = {.r = r, .g = g, .b = b, .ww = ww, .cw = cw}};
     // Drop if full: a newer beacon will arrive shortly anyway.
-    xQueueSend(s_queue, &msg, 0);
+    return xQueueSend(s_queue, &msg, 0) == pdTRUE;
 }
 
-void controller_notify_raw_entry(float r, float g, float b, float ww, float cw,
+bool controller_notify_raw_entry(float r, float g, float b, float ww, float cw,
                                  uint8_t pr, uint8_t pg, uint8_t pb,
                                  uint8_t pww, uint8_t pcw) {
     if (s_queue == NULL) {
-        return;
+        return false;
     }
     ctrl_msg_t msg = {.type = MSG_APPLY_RAW,
                       .u.raw = {.r = r, .g = g, .b = b, .ww = ww, .cw = cw,
                                 .pr = pr, .pg = pg, .pb = pb, .pww = pww, .pcw = pcw}};
     // Drop if full: a newer beacon will arrive shortly anyway.
-    xQueueSend(s_queue, &msg, 0);
+    return xQueueSend(s_queue, &msg, 0) == pdTRUE;
+}
+
+bool controller_notify_lemtone(float a, float b, float lm, float fidelity) {
+    if (s_queue == NULL) {
+        return false;
+    }
+    ctrl_msg_t msg = {.type = MSG_APPLY_LEMTONE,
+                      .u.lemtone = {.a = a, .b = b, .lm = lm, .f = fidelity}};
+    return xQueueSend(s_queue, &msg, 0) == pdTRUE;
+}
+
+void controller_notify_keepalive(void) {
+    if (s_queue == NULL) {
+        return;
+    }
+    ctrl_msg_t msg = {.type = MSG_KEEPALIVE};
+    xQueueSend(s_queue, &msg, 0);  // a missed keep-alive is covered by the next repeat
 }
 
 void controller_notify_dfu2(const dfu2_params_t *params) {

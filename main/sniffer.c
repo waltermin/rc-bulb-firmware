@@ -26,6 +26,24 @@ static bool s_seq_seen;
 // (which have no seq) do not queue the request again while DFU2 is spinning up.
 static bool s_dfu2_notified;
 
+// Duplicate suppression for LemtoneUpdate (0x07). The base station re-sends the same
+// table every interval; a repeat of the entry we already applied is dropped here,
+// before any float work or solve, and only refreshes the fallback timer. Compared on
+// the raw 40-bit wire word. Any other color packet clears it, as does the controller
+// (via sniffer_forget_lemtone) when it falls back to the default.
+static bool s_lt_have;
+static uint64_t s_lt_word;
+static volatile bool s_lt_forget;
+static sniffer_lt_stats_t s_lt_stats;
+
+void sniffer_get_lt_stats(sniffer_lt_stats_t *out) {
+    *out = s_lt_stats;
+}
+
+void sniffer_forget_lemtone(void) {
+    s_lt_forget = true;
+}
+
 // Handle a Dfu2Request addressed to us: if the advertised build id differs from
 // our own running build id, copy the request out of the (aliased) RX buffer and
 // hand it to the controller. If it matches, we are already on the target build.
@@ -64,6 +82,8 @@ static inline uint32_t frame_length(const wifi_pkt_rx_ctrl_t *rx) {
     return rx->sig_mode ? (uint32_t)rx->HT_length : (uint32_t)rx->legacy_length;
 }
 
+static void handle_frame(const uint8_t *payload, uint32_t len);
+
 static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (type != WIFI_PKT_MGMT || buf == NULL) {
         return;
@@ -78,14 +98,17 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
 
-    const uint32_t len = frame_length(&ppkt->rx_ctrl);
+    handle_frame(ppkt->payload, frame_length(&ppkt->rx_ctrl));
+}
 
+// Everything after the radio-level checks: parse, then dispatch to the controller.
+static void handle_frame(const uint8_t *payload, uint32_t len) {
     // Read our id live from the config cache (a single atomic byte load) so a
     // SetConfig that rewrites CFG_BULB_ID takes effect on the very next frame
     // rather than only after a reboot.
     const uint8_t my_id = bulb_config_get_u8(CFG_BULB_ID);
 
-    bulb_parse_result_t r = protocol_parse_beacon(ppkt->payload, len, my_id);
+    bulb_parse_result_t r = protocol_parse_beacon(payload, len, my_id);
     if (!r.valid) {
         return;
     }
@@ -117,9 +140,34 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;  // command handled (or not addressed to us)
     }
 
+    if (s_lt_forget) {
+        s_lt_forget = false;
+        s_lt_have = false;
+    }
+
+    // LemtoneUpdate (0x07): drop an unchanged repeat (keep-alive only); otherwise hand
+    // the decoded value to the controller, remembering it only once it is queued so a
+    // dropped post is retried by the next broadcast.
+    if (r.has_lemtone) {
+        if (s_lt_have && r.lemtone_word == s_lt_word) {
+            s_lt_stats.repeats++;
+            controller_notify_keepalive();
+            return;
+        }
+        if (controller_notify_lemtone(r.lt_a, r.lt_b, r.lt_lm, r.lt_f)) {
+            s_lt_stats.posted++;
+            s_lt_have = true;
+            s_lt_word = r.lemtone_word;
+        } else {
+            s_lt_stats.dropped++;
+        }
+        return;
+    }
+
     // RawLightUpdate (0x06): raw duties + per-channel periods, applied without the
     // curve/max-power cap. Distinct controller path from the curve-mapped colors.
     if (r.has_raw_entry) {
+        s_lt_have = false;
         controller_notify_raw_entry(r.r, r.g, r.b, r.ww, r.cw,
                                     r.period_r, r.period_g, r.period_b,
                                     r.period_ww, r.period_cw);
@@ -129,8 +177,13 @@ static void sniffer_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     // Color-bearing packets (0x02, 0x03; legacy 0x01 if enabled). Any legacy
     // dfu_requested field is ignored (see above).
     if (r.has_entry) {
+        s_lt_have = false;
         controller_notify_entry(r.r, r.g, r.b, r.ww, r.cw);
     }
+}
+
+void sniffer_inject(const uint8_t *frame, uint32_t len) {
+    handle_frame(frame, len);
 }
 
 void sniffer_start(void) {

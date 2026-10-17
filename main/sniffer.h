@@ -27,6 +27,25 @@ void sniffer_apply_channel(uint8_t channel);
 // Disable promiscuous mode (used when transitioning into DFU).
 void sniffer_stop(void);
 
+// Forget the last Lemtone entry applied, so the next one is passed to the controller
+// even if it is a repeat. Called by the controller when it falls back to the default
+// color. Safe from any task (sets a flag the RX callback consumes).
+void sniffer_forget_lemtone(void);
+
+// Counters for the LemtoneUpdate path (diagnostics / self-test).
+typedef struct {
+    uint32_t posted;    // new values handed to the controller
+    uint32_t repeats;   // unchanged repeats dropped (keep-alive sent instead)
+    uint32_t dropped;   // new values lost to a full controller queue
+} sniffer_lt_stats_t;
+void sniffer_get_lt_stats(sniffer_lt_stats_t *out);
+
+// Feed a whole 802.11 frame through the same path as a received one (parse,
+// duplicate suppression, controller hand-off). For the on-device self-test; not
+// synchronised with the RX callback, so only use it when no real traffic for this
+// bulb is expected.
+void sniffer_inject(const uint8_t *frame, uint32_t len);
+
 #ifdef __cplusplus
 }
 #endif

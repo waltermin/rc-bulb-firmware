@@ -7,6 +7,7 @@ set(COMPONENT_SRCS
     "protocol.c"
     "controller.c"
     "dfu2.c"
+    "selftest.c"
 )
 set(COMPONENT_ADD_INCLUDEDIRS ".")
 
@@ -21,6 +22,15 @@ set(COMPONENT_REQUIRES
     lwip
     mbedtls
     pthread   # provides pthread_cond_* pulled in by libstdc++ static-init guards
+    lemtone   # ../lemtone: the Lemtone solver (EXTRA_COMPONENT_DIRS in the top-level CMakeLists)
 )
 
 register_component()
+
+# On-device self-test build: BULB_SELFTEST=1 in the environment (build.ps1 reconfigures
+# every run). It also needs the Lemtone reference vectors from the host tests.
+if("$ENV{BULB_SELFTEST}" STREQUAL "1")
+    component_compile_definitions(LEMTONE_SELFTEST=1)
+    component_compile_options("-I${CMAKE_CURRENT_LIST_DIR}/../lemtone/test")
+    message(STATUS "bulb-firmware: LEMTONE_SELFTEST build")
+endif()

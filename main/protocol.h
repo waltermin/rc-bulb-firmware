@@ -98,8 +98,25 @@
 //     }
 //     A testing/diagnostic path for the per-channel-rate PWM engine.
 //
+//   0x07 LemtoneUpdate — a table of Lemtone values (device-independent colour);
+//        each bulb runs the Lemtone solver (lemtone/) to turn its entry into PWM:
+//     struct LemtoneUpdate {
+//       u8 packet_tag;     // 0x07
+//       u8 entry_count;    // 0..11  (2 + 11 * 6 = 68 bytes <= the 70-byte body limit)
+//       LemtoneEntry entries[entry_count];
+//     }
+//     struct LemtoneEntry { u8 bulb_id; u8 v[5]; }  // v = 40-bit little-endian word:
+//       bits  0..10  a    OKLab a at L = 1:  a  = (code - 1046) * 0.0008   (-0.837 .. 0.801)
+//       bits 11..21  b    OKLab b at L = 1:  b  = (code - 1424) * 0.0008   (-1.139 .. 0.498)
+//       bits 22..33  lum  lumens:            lm = 2^((code - 2048) / 160), 0 = off
+//                                            (1.4e-4 .. 7100 lm, 0.43% per step)
+//       bits 34..39  F    fidelity:          F  = code / 63
+//     The first entry with our id wins (as for 0x03). The parser decodes to floats;
+//     the codes themselves are exposed only for duplicate suppression (lemtone_word).
+//
 // Color-bearing packets (0x01/0x02/0x03) resolve to "no update for me" or a
 // normalized [0,1] color; 0x06 resolves to a raw color + per-channel periods;
+// 0x07 resolves to a Lemtone value (a, b, lm, F) as floats;
 // commands (0x04) resolve to a DFU or config request. protocol_parse_beacon()
 // hides the wire encoding behind bulb_parse_result_t.
 
@@ -136,6 +153,7 @@ extern "C" {
 #define PROTO_TAG_BULB_COMMAND 0x04u          // remote management (config / DFU)
 #define PROTO_TAG_DFU2_REQUEST 0x05u          // pull-based OTA advertisement
 #define PROTO_TAG_RAW_LIGHT_UPDATE 0x06u      // single bulb, f32 raw duties + periods
+#define PROTO_TAG_LEMTONE_UPDATE 0x07u        // Lemtone table (OKLab a, b + lumens + fidelity)
 #define PROTO_TAG_SIZE 1u                     // width of the packet tag itself
 
 // Whether the deprecated 0x01 LightUpdate is still processed. New firmware
@@ -161,6 +179,25 @@ extern "C" {
 #define PROTO_RAW_CHANNELS 5u
 #define PROTO_RAW_SIZE \
     (PROTO_TAG_SIZE + 1u + PROTO_RAW_CHANNELS * 4u + PROTO_RAW_CHANNELS)  // 27
+
+// LemtoneUpdate (0x07): header = packet_tag + entry_count, then 6-byte entries.
+#define PROTO_LEMTONE_HDR_SIZE 2u
+#define PROTO_LEMTONE_ENTRY_SIZE 6u      // bulb_id + 40-bit value word
+#define PROTO_LEMTONE_MAX_ENTRIES 11u
+// Field layout and scaling of the 40-bit value word (see the 0x07 comment above).
+#define PROTO_LT_A_SHIFT 0u
+#define PROTO_LT_B_SHIFT 11u
+#define PROTO_LT_LUM_SHIFT 22u
+#define PROTO_LT_F_SHIFT 34u
+#define PROTO_LT_AB_BITS 11u
+#define PROTO_LT_LUM_BITS 12u
+#define PROTO_LT_F_BITS 6u
+#define PROTO_LT_AB_STEP 0.0008f
+#define PROTO_LT_A_OFFSET 1046
+#define PROTO_LT_B_OFFSET 1424
+#define PROTO_LT_LUM_ZERO 2048           // code of 1 lm
+#define PROTO_LT_LUM_PER_OCTAVE 160      // codes per doubling of lumens
+#define PROTO_LT_F_MAX 63
 
 #define PROTO_CTRL_FLAG_DFU 0x01u       // control_flags value that requests DFU mode
 
@@ -205,6 +242,15 @@ typedef struct {
     // exclusive with has_entry. Period fields are named to match the color fields.
     bool    has_raw_entry;
     uint8_t period_r, period_g, period_b, period_ww, period_cw;
+
+    // LemtoneUpdate (0x07): the entry addressed to my_id, decoded. Mutually exclusive
+    // with has_entry / has_raw_entry. lemtone_word is the entry's raw 40-bit value so
+    // the RX path can drop repeats without comparing floats.
+    bool     has_lemtone;
+    float    lt_a, lt_b;     // OKLab chromaticity at L = 1
+    float    lt_lm;          // lumens, 0 = off
+    float    lt_f;           // fidelity 0..1
+    uint64_t lemtone_word;
 
     // BulbCommand (0x04) fields. is_command is set for any well-formed command
     // regardless of addressing, and seq is then valid — the caller tracks the

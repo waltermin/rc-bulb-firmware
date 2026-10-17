@@ -22,6 +22,7 @@
 #include "sniffer.h"
 #include "controller.h"
 #include "dfu2.h"
+#include "selftest.h"
 
 static const char *TAG = "app";
 
@@ -74,6 +75,7 @@ void app_main(void) {
 
     controller_start();
     sniffer_start();
+    selftest_start();  // no-op unless built with LEMTONE_SELFTEST
 
     ESP_LOGI(TAG, "bulb %d running (fallback %u ms, channel %d)",
              my_id, bulb_config_get_u32(CFG_FALLBACK_MS),

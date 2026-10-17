@@ -2,6 +2,7 @@
 
 #include "protocol.h"
 
+#include <math.h>    // exp2f
 #include <string.h>  // memcpy
 
 static const bulb_parse_result_t INVALID = {
@@ -256,6 +257,49 @@ static bulb_parse_result_t parse_raw_light_update(const uint8_t *pkt, size_t pkt
     return out;
 }
 
+// Decode a 40-bit LemtoneEntry value word into out->lt_* (see protocol.h for the layout).
+static void decode_lemtone(uint64_t w, bulb_parse_result_t *out) {
+    const uint32_t ab_mask = (1u << PROTO_LT_AB_BITS) - 1u;
+    const int a = (int)((w >> PROTO_LT_A_SHIFT) & ab_mask);
+    const int b = (int)((w >> PROTO_LT_B_SHIFT) & ab_mask);
+    const int lum = (int)((w >> PROTO_LT_LUM_SHIFT) & ((1u << PROTO_LT_LUM_BITS) - 1u));
+    const int f = (int)((w >> PROTO_LT_F_SHIFT) & ((1u << PROTO_LT_F_BITS) - 1u));
+    out->has_lemtone = true;
+    out->lemtone_word = w;
+    out->lt_a = (float)(a - PROTO_LT_A_OFFSET) * PROTO_LT_AB_STEP;
+    out->lt_b = (float)(b - PROTO_LT_B_OFFSET) * PROTO_LT_AB_STEP;
+    out->lt_lm = lum ? exp2f((float)(lum - PROTO_LT_LUM_ZERO) / (float)PROTO_LT_LUM_PER_OCTAVE) : 0.0f;
+    out->lt_f = (float)f / (float)PROTO_LT_F_MAX;
+}
+
+// 0x07 LemtoneUpdate: [tag, entry_count, entries...], entry = [id, 5-byte LE word].
+static bulb_parse_result_t parse_lemtone_update(const uint8_t *pkt, size_t pkt_len, uint8_t my_id) {
+    if (pkt_len < PROTO_LEMTONE_HDR_SIZE) {
+        return INVALID;
+    }
+    const uint8_t entry_count = pkt[1];
+    if (entry_count > PROTO_LEMTONE_MAX_ENTRIES) {
+        return INVALID;
+    }
+    const size_t need = PROTO_LEMTONE_HDR_SIZE + (size_t)entry_count * PROTO_LEMTONE_ENTRY_SIZE;
+    if (need > pkt_len) {
+        return INVALID;
+    }
+
+    bulb_parse_result_t out = INVALID;
+    out.valid = true;
+    for (uint8_t i = 0; i < entry_count; i++) {
+        const uint8_t *e = pkt + PROTO_LEMTONE_HDR_SIZE + (size_t)i * PROTO_LEMTONE_ENTRY_SIZE;
+        if (e[0] == my_id) {
+            uint64_t w = 0;
+            for (int k = 4; k >= 0; k--) w = (w << 8) | e[1 + k];
+            decode_lemtone(w, &out);
+            break;
+        }
+    }
+    return out;
+}
+
 // 0x05 Dfu2Request: [tag, fmt, start, bounds, ip(4), port(u16), build_id(len+n),
 // ssid(len+n), pass(len+n)]. Sets dfu2_requested only when my_id is in
 // [start, start+bounds]; every field is length-checked against pkt_len before it
@@ -385,6 +429,8 @@ bulb_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_len
             return parse_dfu2_request(pkt, pkt_len, my_id);
         case PROTO_TAG_RAW_LIGHT_UPDATE:
             return parse_raw_light_update(pkt, pkt_len, my_id);
+        case PROTO_TAG_LEMTONE_UPDATE:
+            return parse_lemtone_update(pkt, pkt_len, my_id);
         default:
             return INVALID;  // unknown or disabled packet tag
     }

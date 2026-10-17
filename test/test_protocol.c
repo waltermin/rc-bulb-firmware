@@ -115,6 +115,31 @@ static size_t build_raw_frame(uint8_t *out, uint8_t bulb_id, const float duties[
     return wrap_beacon(out, pkt, m);
 }
 
+// Build a beacon carrying a LemtoneUpdate (0x07): [tag, count, (id, 5-byte word)...].
+static size_t build_lemtone_frame(uint8_t *out, const uint8_t ids[], const uint64_t words[], uint8_t count) {
+    uint8_t pkt[PROTO_LEMTONE_HDR_SIZE + 16 * PROTO_LEMTONE_ENTRY_SIZE];
+    size_t m = 0;
+    pkt[m++] = PROTO_TAG_LEMTONE_UPDATE;
+    pkt[m++] = count;
+    for (uint8_t i = 0; i < count; i++) {
+        pkt[m++] = ids[i];
+        for (int k = 0; k < 5; k++) pkt[m++] = (uint8_t)(words[i] >> (8 * k));
+    }
+    return wrap_beacon(out, pkt, m);
+}
+
+// Pack field codes into a 40-bit LemtoneEntry word.
+static uint64_t lt_word(uint32_t a, uint32_t b, uint32_t lum, uint32_t f) {
+    return (uint64_t)a | ((uint64_t)b << PROTO_LT_B_SHIFT) | ((uint64_t)lum << PROTO_LT_LUM_SHIFT) |
+           ((uint64_t)f << PROTO_LT_F_SHIFT);
+}
+
+// Relative float compare for decoded lumens.
+static int rel_eq(float a, float b, float tol) {
+    const float d = a - b, m = b < 0 ? -b : b;
+    return (d < 0 ? -d : d) <= tol * m;
+}
+
 static void put_u32_le(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
@@ -667,6 +692,103 @@ int main(void) {
             bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
             printf("dfu2 truncated fields:\n");
             CHECK(!r.valid);
+        }
+    }
+
+
+    // ===================== 0x07 LemtoneUpdate =====================
+    {
+        uint8_t buf[256];
+
+        // --- golden entry from the tool page's independent JS encoder (2700K, 300 lm, F1):
+        //     id 7, bytes 73 84 72 49 ff = codes a 1139 b 1616 lum 3365 F 63 ---
+        {
+            uint8_t pkt[] = {PROTO_TAG_LEMTONE_UPDATE, 1, MY_ID, 0x73, 0x84, 0x72, 0x49, 0xff};
+            size_t len = wrap_beacon(buf, pkt, sizeof pkt);
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            printf("lemtone golden entry:\n");
+            CHECK(r.valid && r.has_lemtone);
+            CHECK(!r.has_entry && !r.has_raw_entry);
+            CHECK(r.lemtone_word == lt_word(1139, 1616, 3365, 63));
+            CHECK(FEQ(r.lt_a, 0.0744f) && FEQ(r.lt_b, 0.1536f));
+            CHECK(rel_eq(r.lt_lm, 300.506f, 1e-5f));
+            CHECK(r.lt_f == 1.0f);
+        }
+
+        // --- the same golden word from the base-station style packer (all-ones edges): ---
+        {
+            uint8_t ids[1] = {55};
+            uint64_t w[1] = {lt_word(2047, 0, 4095, 63)};
+            size_t len = build_lemtone_frame(buf, ids, w, 1);
+            const uint8_t want[6] = {0x37, 0xff, 0x07, 0xc0, 0xff, 0xff};  // JS wireBytes(55, ...)
+            printf("lemtone packing:\n");
+            CHECK(memcmp(buf + 36 + 2 + 3 + 2, want, 6) == 0);
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, 55);
+            CHECK(r.valid && r.has_lemtone);
+            CHECK(FEQ(r.lt_a, (2047 - PROTO_LT_A_OFFSET) * PROTO_LT_AB_STEP));
+            CHECK(FEQ(r.lt_b, -PROTO_LT_B_OFFSET * PROTO_LT_AB_STEP));
+            CHECK(rel_eq(r.lt_lm, 7100.4f, 1e-4f));
+            CHECK(r.lt_f == 1.0f);
+        }
+
+        // --- field scaling: 1 lm and 2 lm exactly, off, the dimmest code, F 0 ---
+        {
+            uint8_t ids[5] = {MY_ID, MY_ID + 1, MY_ID + 2, MY_ID + 3, MY_ID + 4};
+            uint64_t w[5] = {lt_word(1046, 1424, 2048, 0), lt_word(0, 2047, 2208, 21), lt_word(1046, 1424, 0, 63),
+                             lt_word(1046, 1424, 1, 63), lt_word(1046, 1424, 4095, 63)};
+            size_t len = build_lemtone_frame(buf, ids, w, 5);
+            printf("lemtone scaling:\n");
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            CHECK(r.has_lemtone && r.lt_a == 0.0f && r.lt_b == 0.0f && r.lt_lm == 1.0f && r.lt_f == 0.0f);
+            r = protocol_parse_beacon(buf, len, MY_ID + 1);
+            CHECK(r.has_lemtone && FEQ(r.lt_a, -0.8368f) && FEQ(r.lt_b, 0.4984f) && r.lt_lm == 2.0f &&
+                  FEQ(r.lt_f, 1.0f / 3.0f));
+            r = protocol_parse_beacon(buf, len, MY_ID + 2);
+            CHECK(r.has_lemtone && r.lt_lm == 0.0f);                    // code 0 = off
+            r = protocol_parse_beacon(buf, len, MY_ID + 3);
+            CHECK(r.has_lemtone && rel_eq(r.lt_lm, 1.4084e-4f, 1e-3f));  // dimmest step
+            r = protocol_parse_beacon(buf, len, MY_ID + 4);
+            CHECK(r.has_lemtone && rel_eq(r.lt_lm, 7100.4f, 1e-4f));
+        }
+
+        // --- full table: first entry with our id wins; absent id is valid but empty ---
+        {
+            uint8_t ids[11];
+            uint64_t w[11];
+            for (int i = 0; i < 11; i++) { ids[i] = (uint8_t)(20 + i); w[i] = lt_word(1046, 1424, 2048 + i, 0); }
+            ids[9] = MY_ID; ids[10] = MY_ID;
+            w[10] = lt_word(1046, 1424, 0, 0);
+            size_t len = build_lemtone_frame(buf, ids, w, 11);
+            printf("lemtone full table:\n");
+            CHECK(len - (36 + 2 + 3) == 68 && len - (36 + 2 + 3) <= PROTO_DFU2_MAX_BODY);
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            CHECK(r.valid && r.has_lemtone && r.lemtone_word == w[9]);
+            r = protocol_parse_beacon(buf, len, 99);
+            CHECK(r.valid && !r.has_lemtone && !r.has_entry);
+            r = protocol_parse_beacon(buf, len, 25);
+            CHECK(r.valid && r.has_lemtone && r.lemtone_word == w[5]);
+        }
+
+        // --- malformed: too many entries, truncated table, header only ---
+        {
+            uint8_t ids[12] = {0};
+            uint64_t w[12] = {0};
+            size_t len = build_lemtone_frame(buf, ids, w, 12);
+            printf("lemtone malformed:\n");
+            CHECK(!protocol_parse_beacon(buf, len, MY_ID).valid);       // count 12 > 11
+
+            ids[0] = MY_ID;
+            len = build_lemtone_frame(buf, ids, w, 2);
+            buf[36 + 1] = (uint8_t)(buf[36 + 1] - 1);                      // IE one byte short
+            CHECK(!protocol_parse_beacon(buf, len - 1, MY_ID).valid);
+
+            uint8_t hdr[1] = {PROTO_TAG_LEMTONE_UPDATE};
+            len = wrap_beacon(buf, hdr, 1);                                // no count byte
+            CHECK(!protocol_parse_beacon(buf, len, MY_ID).valid);
+
+            len = build_lemtone_frame(buf, ids, w, 0);                     // empty table is fine
+            bulb_parse_result_t r = protocol_parse_beacon(buf, len, MY_ID);
+            CHECK(r.valid && !r.has_lemtone);
         }
     }
 

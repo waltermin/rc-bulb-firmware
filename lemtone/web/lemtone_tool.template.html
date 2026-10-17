@@ -1,0 +1,872 @@
+<!doctype html>
+<!-- lemtone_tool.template.html — source of lemtone_tool.html. build.py inlines the
+     compiled solver (lemtone.c + model, wasm32) where the WASM_B64 marker is. Edit this
+     file, not the generated one. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lemtone tool</title>
+<style>
+  :root { --bg:#111317; --panel:#1a1d23; --line:#2b3039; --text:#d8dce3; --dim:#8a93a3; --acc:#7cc4ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.45 system-ui, sans-serif; }
+  header { padding:10px 18px; border-bottom:1px solid var(--line); display:flex; gap:18px; align-items:baseline; }
+  header h1 { font-size:16px; margin:0; }
+  header .id { color:var(--dim); font-family:ui-monospace, monospace; font-size:12px; }
+  /* left column is exactly the picker's width (460 canvas + padding + border); the right
+     column takes the rest and may shrink below its content (min 0), scrolling inside */
+  main { display:grid; grid-template-columns:490px minmax(0, 1fr); gap:16px; padding:16px; align-items:start; }
+  @media (max-width: 1000px) { main { grid-template-columns:minmax(0, 1fr); } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; min-width:0; }
+  .scroll-x { overflow-x:auto; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px; }
+  .col { display:flex; flex-direction:column; gap:12px; min-width:0; }
+  .stack { position:relative; width:460px; height:460px; }
+  .stack canvas { position:absolute; inset:0; border-radius:6px; }
+  #ui { cursor:crosshair; touch-action:none; }
+  .row { display:flex; gap:10px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  .row label { color:var(--dim); min-width:72px; }
+  input[type=range] { width:220px; }
+  input[type=number], input[type=text], select { background:#0d0f13; color:var(--text); border:1px solid var(--line);
+    border-radius:4px; padding:3px 6px; font:12px ui-monospace, monospace; width:86px; }
+  button { background:#232833; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:4px 10px; cursor:pointer; font-size:12px; }
+  button:hover { border-color:var(--acc); }
+  button.on { background:#1f3b2a; border-color:#3fae6a; }
+  .mono { font-family:ui-monospace, monospace; }
+  table { border-collapse:collapse; width:100%; font-family:ui-monospace, monospace; font-size:12px; }
+  th, td { padding:3px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--dim); font-weight:normal; }
+  td:first-child, th:first-child { text-align:left; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-weight:600; font-size:12px; }
+  .m0 { background:#333; } .m1 { background:#1f5136; } .m2 { background:#6a5417; } .m3 { background:#6d2323; }
+  .kv { display:grid; grid-template-columns:repeat(4, auto); gap:2px 18px; font-family:ui-monospace, monospace; font-size:12px; }
+  .kv span:nth-child(odd) { color:var(--dim); font-family:system-ui, sans-serif; }
+  .sw { width:56px; height:38px; border-radius:6px; border:1px solid var(--line); }
+  .big { font-size:24px; font-weight:600; }
+  #riBars, #spec { display:block; margin-top:8px; }
+  #cmd { overflow-wrap:anywhere; color:#c8e6a0; min-width:0; flex:1; }
+  #log { height:150px; overflow:auto; background:#0d0f13; border:1px solid var(--line); border-radius:4px; padding:6px;
+    font:11px/1.35 ui-monospace, monospace; white-space:pre-wrap; color:#aab3c0; }
+  .note { color:var(--dim); font-size:12px; }
+  .warn { color:#f0b46c; }
+  .presets button { margin:2px 4px 2px 0; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px; }
+  .kv { grid-template-columns:auto auto auto auto; }
+  .kv span { white-space:nowrap; }
+</style>
+</head>
+<body>
+<header><h1>Lemtone tool</h1><span class="id" id="modelId">loading solver…</span></header>
+<main>
+  <div class="col">
+    <div class="panel">
+      <h2>Chromaticity (OKLCh hue / chroma)</h2>
+      <div class="stack"><canvas id="bg" width="460" height="460"></canvas><canvas id="reach" width="460" height="460"></canvas><canvas id="ui" width="460" height="460"></canvas></div>
+      <div class="note">Black: not a real colour (outside the spectral locus, outlined; picks snap to its edge). Darkened:
+        real but outside sRGB (display only). Shaded: at this brightness the bulb has to desaturate (light) or cannot reach
+        this brightness even as white (dark). Triangle: bulb RGB gamut; line: CW–WW; ○ target, ● predicted output.
+        Rings: chroma every 0.05; spokes: hue every 30°. Shift-drag keeps the hue, Alt-drag keeps the chroma.
+        The plane is the canonical Lemtone chromaticity: OKLab a, b at L = 1, so chroma is OKLCh C at L 1.</div>
+      <div class="row"><label>Overlay</label><button id="reachBtn" class="on">reachability</button>
+        <button id="locusBtn" class="on">blackbody</button></div>
+    </div>
+    <div class="panel">
+      <h2>Target</h2>
+      <div class="row"><label>Hue</label><input type="range" id="hSlider" min="0" max="360" step="0.5"><input type="number" id="hNum" step="1" min="0" max="360"><span class="note">°</span></div>
+      <div class="row"><label>Chroma</label><input type="range" id="cSlider" min="0" max="1000"><input type="number" id="cNum" step="0.005" min="0">
+        <span id="cNote" class="note"></span></div>
+      <div class="row"><label>CCT</label><input type="range" id="cctSlider" min="0" max="1000"><input type="number" id="tcct" step="50" placeholder="K">
+        <span id="cctNote" class="note"></span></div>
+      <div class="row"><label>Lumens</label><input type="range" id="bSlider" min="0" max="1000"><input type="number" id="bNum" step="1"><span class="note">lm</span></div>
+      <div class="row"><label>Fidelity</label><input type="range" id="fSlider" min="0" max="100"><span id="fVal" class="mono"></span></div>
+      <div class="row"><label>CIE x, y</label><input type="number" id="tx" step="0.001"><input type="number" id="ty" step="0.001"></div>
+      <div class="row presets" id="presets"></div>
+      <div class="row"><label>OKLab a, b</label><span id="abVal" class="mono"></span></div>
+      <div class="row"><label>Code</label><span id="code" class="mono"></span></div>
+      <div class="row"><label>Wire 0x07</label><span id="wire" class="mono"></span></div>
+      <div class="note">Every solve uses the values as the bulb decodes them from the wire entry (11-bit a, b; 12-bit log
+        lumens; 6-bit fidelity), so this page computes exactly what the bulb will.</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel">
+      <h2>Solve <span id="mode" class="badge"></span></h2>
+      <div class="row">
+        <div class="sw" id="swT" title="target chromaticity"></div><div class="sw" id="swO" title="predicted output chromaticity"></div>
+        <div class="kv" id="kv"></div>
+      </div>
+      <div class="scroll-x"><table>
+        <thead><tr><th>ch</th><th>solver duty</th><th>period</th><th>PWM freq</th><th>ticks</th><th>1 tick</th><th>command duty</th><th>light duty</th></tr></thead>
+        <tbody id="tbl"></tbody>
+      </table></div>
+      <div class="row"><label>command</label><span id="cmd" class="mono"></span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Colour rendering (predicted)</h2>
+      <div class="row" style="gap:22px">
+        <div><div class="note">CRI Ra</div><div id="criRa" class="big mono"></div></div>
+        <div><div class="note">R9 (red)</div><div id="criR9" class="big mono"></div></div>
+        <div><div class="note">output CCT / Duv</div><div id="criCct" class="mono"></div></div>
+        <div id="criWarn" class="note warn"></div>
+      </div>
+      <canvas id="riBars" width="560" height="96" style="width:100%;max-width:560px"></canvas>
+      <canvas id="spec" width="560" height="170" style="width:100%;max-width:560px"></canvas>
+      <div class="note">Spectrum the solve should emit (calibrated per-channel spectra × duty × interaction), against the CRI
+        reference illuminant at its CCT (dashed; same luminance). CIE 13.3 Ra = mean of R1–R8. Checked against 40 measured
+        whites from the mix session: Ra within ±1.1 (rms 0.5), R9 rms 3 (worst 7). Not meaningful past Duv 0.0054.</div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h2>Base station</h2>
+        <div id="noSerial" class="warn" hidden>Web Serial is not available in this browser (use Chrome or Edge).</div>
+        <div class="row"><button id="connBtn">Connect…</button><button id="resetBtn" title="pulse RTS (EN) to reboot the base station">Reset base</button>
+          <span id="connState" class="note">not connected</span></div>
+        <div class="row"><label>Bulb ids</label><input type="number" id="bulbId" min="0" max="255" value="55" title="first id">
+          <span class="note">to</span><input type="number" id="bulbLast" min="0" max="255" placeholder="(same)" title="last id (inclusive); empty = one bulb">
+          <span id="rangeNote" class="note"></span></div>
+        <div class="row"><label></label><button id="liveBtn">Live send: off</button><button id="offBtn">stop</button></div>
+        <div class="row"><label>Send as</label><select id="sendMode" style="width:230px">
+          <option value="lt">lt — Lemtone, bulb solves (0x07)</option>
+          <option value="setraw">setraw — page solves (0x06)</option></select></div>
+        <div class="note">Sends on every change, one command at a time (waits for the <span class="mono">base&gt;</span>
+          prompt). <span class="mono">lt</span> sends the Lemtone value and the bulb runs the solver;
+          <span class="mono">setraw</span> sends this page's duties and periods. Both should give identical light.
+          A range sends <span class="mono">ltrange</span> (every bulb solves for itself); <span class="mono">setraw</span>
+          has one target on the base station, so it only addresses the first id. Stop sends
+          <span class="mono">ltclr</span> for the range / <span class="mono">setraw off</span>; bulbs fall back to their default
+          15 s later. Changing the range while live clears the old one first.</div>
+        <div id="log"></div>
+        <div class="row" style="margin-top:6px;flex-wrap:nowrap">
+          <span class="mono note">base&gt;</span>
+          <input type="text" id="conIn" class="mono" style="flex:1;width:auto;min-width:0" spellcheck="false" autocomplete="off"
+            placeholder="type a command, Enter to send (↑/↓ history)">
+          <button id="conSend">Send</button>
+        </div>
+        <div class="row" style="margin-top:2px">
+          <label style="min-width:auto"><input type="checkbox" id="logLive"> show live traffic</label>
+          <button id="logClear">clear log</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>PWM periods</h2>
+        <div class="row"><label>Mode</label><select id="fixedN" style="width:150px">
+          <option value="0">auto (dynamic)</option><option value="8">fixed 2^8</option><option value="9">fixed 2^9</option>
+          <option value="10">fixed 2^10</option><option value="11">fixed 2^11</option><option value="12">fixed 2^12</option>
+          <option value="13">fixed 2^13</option><option value="14">fixed 2^14</option></select>
+          <span class="note">(fixed applies to setraw only; the bulb always runs auto)</span></div>
+        <div class="row"><label>n range</label><input type="number" id="cNmin" min="8" max="14"><input type="number" id="cNmax" min="8" max="14"></div>
+        <div class="row"><label>Res. ticks</label><input type="number" id="cRes" min="1" max="4000"></div>
+        <div class="row"><label>Tier 1</label>lm &gt;<input type="number" id="cB1" step="1"> cap 2^<input type="number" id="cN1" min="8" max="14" style="width:52px"></div>
+        <div class="row"><label>Tier 2</label>lm &gt;<input type="number" id="cB2" step="1"> cap 2^<input type="number" id="cN2" min="8" max="14" style="width:52px"></div>
+        <div class="note">A channel's period grows from n min until it gets <i>res. ticks</i> of on-time, capped by total
+          lumens (first tier exceeded wins, else n max). Stateless: the same value always gives the same periods.
+          Changes here affect this page only; the bulb uses the compiled defaults.</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const WASM_B64 = /*WASM_B64*/"";
+const CRI_TABLES = /*CRI_TABLES*/null;   // web/cri_tables.json (CIE CMF, TCS01-14, D-series)
+const MODEL_SPD = /*MODEL_SPD*/null;     // {wl, knots, spd} from lemtone_model.json
+/*CRI_JS*/
+const CH = ["r", "g", "b", "ww", "cw"];
+const MODES = ["OFF", "EXACT", "DESAT", "CLAMP"];
+const $ = id => document.getElementById(id);
+let W = null;
+
+// ---------------------------------------------------------------- colour math
+const mul3 = (m, v) => [0, 1, 2].map(r => m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2]);
+function inv3(m) {
+  const [a, b, c] = m[0], [d, e, f] = m[1], [g, h, i] = m[2];
+  const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g, det = a * A + b * B + c * C;
+  return [[A / det, -(b * i - c * h) / det, (b * f - c * e) / det],
+          [B / det, (a * i - c * g) / det, -(a * f - c * d) / det],
+          [C / det, -(a * h - b * g) / det, (a * e - b * d) / det]];
+}
+const XYZ_LMS = [[0.8189330101, 0.3618667424, -0.1288597137], [0.0329845436, 0.9293118715, 0.0361456387],
+                 [0.0482003018, 0.2643662691, 0.6338517070]];
+const LMS_XYZ = inv3(XYZ_LMS);
+const XYZ_RGB = [[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 0.0415560], [0.0556434, -0.2040259, 1.0572252]];
+function xyzToOklab(X) {
+  const [l, m, s] = mul3(XYZ_LMS, X).map(Math.cbrt);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+function oklabLms_([L, a, b]) {
+  return [L + 0.3963377774 * a + 0.2158037573 * b, L - 0.1055613458 * a - 0.0638541728 * b,
+          L - 0.0894841775 * a - 1.2914855480 * b];
+}
+const oklabToXyz = lab => mul3(LMS_XYZ, oklabLms_(lab).map(v => v * v * v));
+const xyToXyz = (x, y) => [x / y, 1, (1 - x - y) / y];
+const xyOf = X => { const s = X[0] + X[1] + X[2]; return [X[0] / s, X[1] / s]; };
+const gam = v => v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+const upvp = X => { const d = X[0] + 15 * X[1] + 3 * X[2]; return [4 * X[0] / d, 9 * X[1] / d]; };
+function swatch(x, y) {  // chromaticity only, normalised to the brightest channel
+  let rgb = mul3(XYZ_RGB, xyToXyz(x, y)).map(v => Math.max(0, v));
+  const m = Math.max(...rgb) || 1;
+  rgb = rgb.map(v => Math.round(gam(v / m) * 255));
+  return `rgb(${rgb.join(",")})`;
+}
+// Planckian locus (Kim et al. cubic spline), 1667..25000 K
+function cctToXy(T) {
+  const t = 1e3 / T, t2 = t * t, t3 = t2 * t;
+  const x = T <= 4000 ? -0.2661239 * t3 - 0.2343589 * t2 + 0.8776956 * t + 0.179910
+                      : -3.0258469 * t3 + 2.1070379 * t2 + 0.2226347 * t + 0.240390;
+  const x2 = x * x, x3 = x2 * x;
+  const y = T <= 2222 ? -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * x - 0.20219683
+          : T <= 4000 ? -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * x - 0.16748867
+                      : 3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483;
+  return [x, y];
+}
+const xyToCct = ([x, y]) => { const n = (x - 0.3320) / (0.1858 - y); return 449 * n ** 3 + 3525 * n ** 2 + 6823.3 * n + 5520.33; };
+
+// ---------------------------------------------------------------- plane mapping
+// OKLab is homogeneous (scaling XYZ by k^3 scales L, a, b by k), so each chromaticity is
+// one direction; draw it where it crosses L = L_DISP.
+const L_DISP = 1, SIZE = 460;   // L 1: plane coordinates are the canonical Lemtone a, b
+let R = 0.4;   // plane half-range in a/b, set from the bulb primaries
+function xyToPlane(x, y) {
+  const lab = xyzToOklab(xyToXyz(x, y)), k = L_DISP / lab[0];
+  return [lab[1] * k, lab[2] * k];
+}
+// Spectral locus (CIE 1931 2°, 380-780 nm) closed by the purple line: the boundary of
+// every real colour. Positive LMS / XYZ is not enough — points just outside the
+// horseshoe pass those tests but no light can produce them.
+const LOCUS = CRI_TABLES.cmf[0].map((xb, i) => xyOf([xb, CRI_TABLES.cmf[1][i], CRI_TABLES.cmf[2][i]]));
+function inLocus([x, y]) {
+  let inside = false;   // even-odd ray cast; the closing edge is the purple line
+  for (let i = 0, j = LOCUS.length - 1; i < LOCUS.length; j = i++) {
+    const [xi, yi] = LOCUS[i], [xj, yj] = LOCUS[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function planeToXy(a, b) {
+  const lms = oklabLms_([L_DISP, a, b]);
+  if (lms.some(v => v <= 0)) return null;
+  const X = mul3(LMS_XYZ, lms.map(v => v * v * v));
+  if (X.some(v => v <= 0)) return null;
+  const xy = xyOf(X);
+  return inLocus(xy) ? xy : null;   // null = not a real colour
+}
+const toPx = (a, b) => [(a / R + 1) * SIZE / 2, (1 - b / R) * SIZE / 2];
+const fromPx = (px, py) => [(px / SIZE * 2 - 1) * R, (1 - py / SIZE * 2) * R];
+
+// OKLCh on the same plane: C = chroma at L = 1, h = hue in degrees. Only the
+// chromaticity matters (brightness is lumens), so L is fixed.
+const LCH = { h: 60, C: 0 };   // kept across updates so hue survives passing through white
+let C_SLIDER = 0.6;            // chroma slider full scale: just past the bulb's widest gamut edge (set at boot)
+function lchToXy(h, C) {
+  const t = h * Math.PI / 180;
+  return planeToXy(C * Math.cos(t), C * Math.sin(t));
+}
+// Largest chroma at hue h that is still a physical colour.
+function maxChroma(h) {
+  let lo = 0, hi = R * 2;
+  for (let k = 0; k < 30; k++) { const m = (lo + hi) / 2; if (lchToXy(h, m)) lo = m; else hi = m; }
+  return lo;
+}
+function syncLch(x, y) {
+  const [a, b] = xyToPlane(x, y), C = Math.hypot(a, b);
+  LCH.C = C;
+  if (C > 1e-4) LCH.h = ((Math.atan2(b, a) * 180 / Math.PI) % 360 + 360) % 360;
+}
+// Set the target from hue/chroma (the caller clamps C to maxChroma).
+function setLch(h, C) {
+  const xy = lchToXy(h, C);
+  if (!xy) return;
+  LCH.h = h; LCH.C = C; S.x = xy[0]; S.y = xy[1];
+  update("lch");
+}
+// Chroma of the bulb's gamut edge at hue h: the largest C the solver reaches without
+// desaturating at a very low brightness (where only chromaticity limits it). The gamut is
+// convex and contains white, so bisection along the hue ray is exact.
+function bulbChroma(h) {
+  const t = h * Math.PI / 180;
+  const ok = C => lchToXy(h, C) && W.lt_probe(C * Math.cos(t), C * Math.sin(t), 0.5, 0) === 1;
+  let lo = 0, hi = maxChroma(h);
+  if (ok(hi)) return hi;
+  for (let k = 0; k < 22; k++) { const m = (lo + hi) / 2; if (ok(m)) lo = m; else hi = m; }
+  return lo;
+}
+function showLch(fromLch) {
+  if (!fromLch) syncLch(S.x, S.y);
+  $("hSlider").value = LCH.h; $("hNum").value = LCH.h.toFixed(1);
+  $("cSlider").value = Math.round(Math.min(1, LCH.C / C_SLIDER) * 1000); $("cNum").value = LCH.C.toFixed(4);
+  const edge = bulbChroma(LCH.h);
+  $("cNote").textContent = `bulb gamut edge ${edge.toFixed(3)} at this hue` + (LCH.C > edge + 1e-4 ? " (outside: will desaturate)" : "");
+}
+
+// ---------------------------------------------------------------- state
+const S = { x: 0.4596, y: 0.4105, lm: 300, F: 1.0, live: false, reach: true, locus: true, send: "lt" };
+let PRIM = [];   // bulb channel chromaticities
+
+// ---------------------------------------------------------------- drawing
+function drawBackground() {
+  const cx = $("bg").getContext("2d"), img = cx.createImageData(SIZE, SIZE);
+  for (let py = 0; py < SIZE; py++) for (let px = 0; px < SIZE; px++) {
+    const [a, b] = fromPx(px + 0.5, py + 0.5), o = (py * SIZE + px) * 4;
+    const inRgb = (aa, bb) => { const lms = oklabLms_([L_DISP, aa, bb]);
+      const rgb = mul3(XYZ_RGB, mul3(LMS_XYZ, lms.map(v => v * v * v))); return rgb.every(v => v >= 0 && v <= 1) ? rgb : null; };
+    let rgb = inRgb(a, b), dim = 1;
+    if (!planeToXy(a, b)) { rgb = [0, 0, 0]; dim = 0; }   // not a real colour: black
+    else if (!rgb) {   // real but outside sRGB: largest in-gamut chroma at this hue, darkened
+      let lo = 0, hi = 1;
+      for (let k = 0; k < 14; k++) { const t = (lo + hi) / 2; if (inRgb(a * t, b * t)) lo = t; else hi = t; }
+      rgb = inRgb(a * lo, b * lo) || [0, 0, 0]; dim = 0.42;
+    }
+    img.data[o] = gam(rgb[0]) * 255 * dim; img.data[o + 1] = gam(rgb[1]) * 255 * dim;
+    img.data[o + 2] = gam(rgb[2]) * 255 * dim; img.data[o + 3] = 255;
+  }
+  cx.putImageData(img, 0, 0);
+}
+
+let reachTimer = 0;
+function scheduleReach() { clearTimeout(reachTimer); reachTimer = setTimeout(drawReach, 120); }
+function drawReach() {
+  const cx = $("reach").getContext("2d");
+  cx.clearRect(0, 0, SIZE, SIZE);
+  if (!S.reach || !W) return;
+  const G = 72, cell = SIZE / G;
+  for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+    const ab = fromPx((gx + 0.5) * cell, (gy + 0.5) * cell);
+    if (!planeToXy(...ab)) continue;
+    const m = W.lt_probe(ab[0], ab[1], S.lm, S.F);
+    if (m === 2) cx.fillStyle = "rgba(10,12,16,0.45)";
+    else if (m === 3 || m === 0) cx.fillStyle = "rgba(10,12,16,0.85)";
+    else continue;
+    cx.fillRect(gx * cell, gy * cell, cell + 0.5, cell + 0.5);
+  }
+}
+
+function pathXy(cx, pts) {
+  cx.beginPath();
+  pts.forEach((p, i) => { const [u, v] = toPx(...xyToPlane(...p)); i ? cx.lineTo(u, v) : cx.moveTo(u, v); });
+}
+function drawUi(outXy) {
+  const cx = $("ui").getContext("2d");
+  cx.clearRect(0, 0, SIZE, SIZE);
+  cx.lineWidth = 1;
+  // polar grid: chroma rings every 0.05, hue spokes every 30 deg (0 = +a, counter-clockwise)
+  const [ox, oy] = toPx(0, 0), pxPerC = SIZE / 2 / R;
+  cx.strokeStyle = "rgba(255,255,255,0.10)";
+  for (let c = 0.05; c < R * 1.45; c += 0.05) { cx.beginPath(); cx.arc(ox, oy, c * pxPerC, 0, 7); cx.stroke(); }
+  cx.font = "10px ui-monospace, monospace"; cx.fillStyle = "rgba(255,255,255,0.45)"; cx.textAlign = "center";
+  for (let h = 0; h < 360; h += 30) {
+    const t = h * Math.PI / 180, ex = Math.cos(t), ey = -Math.sin(t);
+    cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(ox + ex * SIZE, oy + ey * SIZE); cx.stroke();
+    // label just inside the canvas edge along the spoke
+    const k = Math.min((SIZE / 2 - 12) / Math.max(Math.abs(ex), 1e-9), (SIZE / 2 - 10) / Math.max(Math.abs(ey), 1e-9));
+    cx.fillText(`${h}°`, ox + ex * k, oy + ey * k + 3);
+  }
+  // current hue spoke
+  if (LCH.C > 1e-4) {
+    const t = LCH.h * Math.PI / 180;
+    cx.strokeStyle = "rgba(255,255,255,0.35)"; cx.setLineDash([2, 3]);
+    cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(ox + Math.cos(t) * SIZE, oy - Math.sin(t) * SIZE); cx.stroke();
+    cx.setLineDash([]);
+  }
+  // spectral locus + purple line (sampled straight in xy, curved here)
+  cx.strokeStyle = "rgba(255,255,255,0.4)";
+  const loc = [];
+  for (let k = 0; k < LOCUS.length; k++) loc.push(LOCUS[k]);
+  const p0 = LOCUS[LOCUS.length - 1], p1 = LOCUS[0];
+  for (let k = 1; k < 40; k++) loc.push([p0[0] + (p1[0] - p0[0]) * k / 40, p0[1] + (p1[1] - p0[1]) * k / 40]);
+  pathXy(cx, loc); cx.closePath(); cx.stroke();
+  // RGB triangle, sampled along straight xy edges
+  cx.strokeStyle = "rgba(255,255,255,0.75)";
+  const tri = [];
+  for (let e = 0; e < 3; e++) { const p = PRIM[e], q = PRIM[(e + 1) % 3];
+    for (let k = 0; k <= 40; k++) tri.push([p[0] + (q[0] - p[0]) * k / 40, p[1] + (q[1] - p[1]) * k / 40]); }
+  pathXy(cx, tri); cx.closePath(); cx.stroke();
+  // white line
+  cx.strokeStyle = "rgba(255,230,180,0.9)"; cx.lineWidth = 2;
+  pathXy(cx, [PRIM[4], PRIM[3]]); cx.stroke(); cx.lineWidth = 1;
+  if (S.locus) {
+    cx.setLineDash([3, 3]); cx.strokeStyle = "rgba(255,255,255,0.45)";
+    const pts = []; for (let T = 1700; T <= 12000; T += 100) pts.push(cctToXy(T));
+    pathXy(cx, pts); cx.stroke(); cx.setLineDash([]);
+  }
+  cx.font = "11px system-ui"; cx.fillStyle = "#fff";
+  PRIM.forEach((p, i) => { const [u, v] = toPx(...xyToPlane(...p));
+    cx.beginPath(); cx.arc(u, v, 3, 0, 7); cx.fill(); cx.fillText(CH[i], u + 5, v - 5); });
+  // target + output
+  const [tu, tv] = toPx(...xyToPlane(S.x, S.y));
+  cx.strokeStyle = "#fff"; cx.lineWidth = 2; cx.beginPath(); cx.arc(tu, tv, 8, 0, 7); cx.stroke();
+  cx.strokeStyle = "#000"; cx.lineWidth = 1; cx.beginPath(); cx.arc(tu, tv, 10, 0, 7); cx.stroke();
+  if (outXy) {
+    const [ou, ov] = toPx(...xyToPlane(...outXy));
+    cx.fillStyle = "#fff"; cx.beginPath(); cx.arc(ou, ov, 3.5, 0, 7); cx.fill();
+    cx.strokeStyle = "#000"; cx.beginPath(); cx.arc(ou, ov, 4.5, 0, 7); cx.stroke();
+  }
+}
+
+// ---------------------------------------------------------------- Lemtone code
+// Human-readable form of the canonical value: a colour temperature for whites near the
+// blackbody locus, else OKLCh hue and chroma (L 1); then lumens and fidelity.
+const fmtLm = lm => lm >= 100 ? lm.toFixed(0) : lm >= 1 ? lm.toFixed(1) : lm.toPrecision(2);
+function lemtoneCode(ab, lm, F) {
+  const tail = ` · ${fmtLm(lm)} lm · F${Math.round(F * 100)}`;
+  const { T, duv } = duvOf(S.x, S.y), C = Math.hypot(ab[0], ab[1]);
+  if (isFinite(duv) && Math.abs(duv) < 0.006) return `${Math.round(T / 50) * 50}K${tail}`;
+  const h = ((Math.atan2(ab[1], ab[0]) * 180 / Math.PI) % 360 + 360) % 360;
+  return `h${h.toFixed(0)}° C${C.toFixed(3)}${tail}`;
+}
+
+// ---------------------------------------------------------------- addressed bulbs
+// First..last from the id boxes (last empty = one bulb). setraw only ever has one target.
+function target() {
+  const f = parseInt($("bulbId").value, 10), l = parseInt($("bulbLast").value, 10);
+  const first = isFinite(f) ? Math.min(255, Math.max(0, f)) : 0;
+  const last = isFinite(l) ? Math.min(255, Math.max(first, l)) : first;
+  return { first, last };
+}
+const ltCmdFor = (t, args) => t.first === t.last ? `lt ${t.first} ${args}` : `ltrange ${t.first} ${t.last} ${args}`;
+const stopCmdFor = (t, mode) => mode === "lt"
+  ? (t.first === t.last ? `ltclr ${t.first}` : `ltclr ${t.first} ${t.last}`) : "setraw off";
+let LIVE_TARGET = null;   // range the live commands last addressed (cleared when it changes)
+
+// ---------------------------------------------------------------- wire (0x07 entry)
+// Mirrors bulb-firmware/main/protocol.h: entry = u8 id + 40 bits LE:
+//   a 11 | b 11 << 11 | lum 12 << 22 | F 6 << 34
+//   a = (code - 1046) * 0.0008, b = (code - 1424) * 0.0008 (OKLab at L 1)
+//   lm = 2^((code - 2048) / 160), code 0 = off;  F = code / 63
+const WIRE = { STEP: 0.0008, A_OFF: 1046, B_OFF: 1424, LM_ZERO: 2048, LM_OCT: 160 };
+const clampI = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+function wireEncode(a, b, lm, F) {
+  return {
+    a: clampI(Math.round(a / WIRE.STEP) + WIRE.A_OFF, 0, 2047),
+    b: clampI(Math.round(b / WIRE.STEP) + WIRE.B_OFF, 0, 2047),
+    lm: lm > 0 ? clampI(Math.round(Math.log2(lm) * WIRE.LM_OCT) + WIRE.LM_ZERO, 1, 4095) : 0,
+    F: clampI(Math.round(F * 63), 0, 63),
+  };
+}
+// float32 arithmetic, as protocol.c does it
+const f32 = Math.fround;
+function wireDecode(c) {
+  return {
+    a: f32((c.a - WIRE.A_OFF) * f32(WIRE.STEP)), b: f32((c.b - WIRE.B_OFF) * f32(WIRE.STEP)),
+    lm: c.lm ? f32(2 ** f32((c.lm - WIRE.LM_ZERO) / f32(WIRE.LM_OCT))) : 0, F: f32(c.F / f32(63)),
+  };
+}
+function wireBytes(id, c) {
+  const v = c.a + c.b * 2 ** 11 + c.lm * 2 ** 22 + c.F * 2 ** 34;
+  return [id & 255, ...[0, 1, 2, 3, 4].map(k => Math.floor(v / 2 ** (8 * k)) % 256)];
+}
+
+// ---------------------------------------------------------------- lumen slider
+// Log scale, 0.01 .. 3162 lm (the bulb's dimmest step is ~0.003 lm, its brightest ~1000).
+const sliderToLm = v => 10 ** (-2 + 5.5 * v / 1000);
+const lmToSlider = lm => Math.round((Math.log10(Math.max(lm, 0.01)) + 2) / 5.5 * 1000);
+
+// ---------------------------------------------------------------- CCT slider
+// Linear in mired (1e6 / T), which is close to perceptually even; warm on the left.
+const CCT_MIN = 1700, CCT_MAX = 10000;
+const sliderToCct = s => 1e6 / (1e6 / CCT_MIN - s / 1000 * (1e6 / CCT_MIN - 1e6 / CCT_MAX));
+const cctToSlider = T => Math.round((1e6 / CCT_MIN - 1e6 / T) / (1e6 / CCT_MIN - 1e6 / CCT_MAX) * 1000);
+// CCT = nearest point on the blackbody locus in CIE 1960 uv (searched in mired, so it
+// matches cctToXy exactly); Duv = signed distance to it (+ = above the locus, greenish).
+function duvOf(x, y) {
+  const uv = X => { const d = X[0] + 15 * X[1] + 3 * X[2]; return [4 * X[0] / d, 6 * X[1] / d]; };
+  const q = uv(xyToXyz(x, y));
+  const dist = m => { const p = uv(xyToXyz(...cctToXy(1e6 / m))); return Math.hypot(q[0] - p[0], q[1] - p[1]); };
+  const M0 = 1e6 / 25000, M1 = 1e6 / 1667;
+  let best = M0, bd = Infinity;
+  for (let m = M0; m <= M1; m += 4) { const d = dist(m); if (d < bd) { bd = d; best = m; } }
+  let lo = Math.max(M0, best - 4), hi = Math.min(M1, best + 4);
+  for (let k = 0; k < 40; k++) { const a = lo + (hi - lo) / 3, b = hi - (hi - lo) / 3; if (dist(a) < dist(b)) hi = b; else lo = a; }
+  const m = (lo + hi) / 2, T = 1e6 / m, p = uv(xyToXyz(...cctToXy(T)));
+  if (m <= M0 + 1e-6 || m >= M1 - 1e-6) return { T, duv: NaN };   // beyond the locus ends
+  return { T, duv: Math.sign(q[1] - p[1]) * Math.hypot(q[0] - p[0], q[1] - p[1]) };
+}
+function syncCct(fromCct) {
+  const { T, duv } = duvOf(S.x, S.y);
+  const onLocus = isFinite(duv) && Math.abs(duv) < 0.006;
+  if (!fromCct) {
+    if (isFinite(duv)) $("cctSlider").value = cctToSlider(Math.min(CCT_MAX, Math.max(CCT_MIN, T)));
+    $("tcct").value = isFinite(duv) ? Math.round(T) : "";
+  }
+  $("cctSlider").style.opacity = onLocus ? 1 : 0.4;
+  $("cctNote").textContent = isFinite(duv) ? `Duv ${duv >= 0 ? "+" : ""}${duv.toFixed(4)}${onLocus ? "" : " (off locus)"}` : "not a white";
+}
+
+// ---------------------------------------------------------------- update
+let lastCmd = "";
+function update(fromInputs) {
+  if (!W) return;
+  // fromInputs: true = the x,y fields themselves, "cct" / "lch" = those controls
+  if (fromInputs !== true) { $("tx").value = S.x.toFixed(4); $("ty").value = S.y.toFixed(4); }
+  syncCct(fromInputs === "cct");
+  showLch(fromInputs === "lch");
+  $("bNum").value = fmtLm(S.lm);
+  $("bSlider").value = lmToSlider(S.lm);
+  $("fSlider").value = Math.round(S.F * 100); $("fVal").textContent = S.F.toFixed(2);
+
+  // canonical value -> wire -> what the bulb decodes; everything below uses the decoded value
+  const ab = xyToPlane(S.x, S.y);
+  const T = target(), bid = T.first;
+  const n = T.last - T.first + 1;
+  $("rangeNote").textContent = n === 1 ? "" : S.send === "lt" ? `${n} bulbs (ltrange)` : `${n} bulbs — setraw addresses only ${bid}`;
+  $("rangeNote").className = n > 1 && S.send !== "lt" ? "note warn" : "note";
+  const code = wireEncode(ab[0], ab[1], S.lm, S.F), V = wireDecode(code);
+  $("abVal").textContent = `${ab[0].toFixed(4)}, ${ab[1].toFixed(4)}  → wire ${V.a.toFixed(4)}, ${V.b.toFixed(4)}`;
+  $("code").textContent = lemtoneCode([V.a, V.b], V.lm, V.F);
+  $("wire").textContent = `${wireBytes(bid, code).map(v => v.toString(16).padStart(2, "0")).join(" ")}` +
+    `   (a ${code.a} b ${code.b} lum ${code.lm} F ${code.F})`;
+
+  const mode = W.lt_compute(V.a, V.b, V.lm, V.F);
+  const t0 = performance.now(); const reps = 30;
+  for (let k = 0; k < reps; k++) W.lt_probe(V.a, V.b, V.lm, V.F);
+  const us = (performance.now() - t0) / reps * 1000;
+
+  const Xo = [0, 1, 2].map(c => W.lt_out_xyz(c));
+  const outXy = Xo[1] > 0 ? xyOf(Xo) : null;
+  const lmOut = Xo[1] * W.lt_lm_per_y();
+  const Xt = xyToXyz(S.x, S.y);
+  const duv = outXy ? Math.hypot(...upvp(Xt).map((v, i) => v - upvp(xyToXyz(...outXy))[i])) : NaN;
+
+  $("mode").textContent = MODES[mode]; $("mode").className = "badge m" + mode;
+  $("swT").style.background = swatch(S.x, S.y);
+  $("swO").style.background = outXy ? swatch(...outXy) : "#000";
+  const kv = [
+    ["target xy", `${S.x.toFixed(4)}, ${S.y.toFixed(4)}`], ["output xy", outXy ? `${outXy[0].toFixed(4)}, ${outXy[1].toFixed(4)}` : "—"],
+    ["target lm", fmtLm(V.lm)], ["output lm", `${fmtLm(lmOut)} (${V.lm > 0 ? ((lmOut / V.lm - 1) * 100).toFixed(2) : "—"}%)`],
+    ["Δu′v′", isFinite(duv) ? duv.toFixed(4) : "—"], ["desaturated", `${(W.lt_desat() * 100).toFixed(1)}%`],
+    ["model evals", W.lt_evals()], ["solve time", `${us.toFixed(1)} µs (wasm)`],
+  ];
+  $("kv").innerHTML = kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
+
+  const cmdD = [], per = [];
+  $("tbl").innerHTML = CH.map((c, i) => {
+    const n = W.lt_period(i), ticks = W.lt_ticks(i), cd = W.lt_cmd_duty(i);
+    cmdD.push(cd); per.push(n);
+    return `<tr><td>${c}</td><td>${W.lt_duty(i).toFixed(5)}</td><td>2^${n}</td><td>${(1e6 / 2 ** n).toFixed(0)} Hz</td>
+      <td>${ticks} / ${2 ** n}</td><td>${ticks ? (100 / ticks).toFixed(2) + "%" : "—"}</td>
+      <td>${cd.toFixed(6)}</td><td>${W.lt_eff_duty(i).toFixed(6)}</td></tr>`;
+  }).join("");
+
+  // setraw: ticks / 2^n printed to 8 places round-trips through strtof -> lroundf(d * 2^n) exactly.
+  // lt: decoded values printed so the base station re-encodes the same codes.
+  const cmd = S.send === "lt"
+    ? ltCmdFor(T, `${V.a.toFixed(6)} ${V.b.toFixed(6)} ${V.lm ? V.lm.toPrecision(7) : 0} ${V.F.toFixed(6)}`)
+    : `setraw ${bid} ${cmdD.map(v => v.toFixed(8)).join(" ")} 1 ${per.join(" ")}`;
+  $("cmd").textContent = cmd;
+  lastCmd = cmd;
+  if (S.live) { LIVE_TARGET = { ...T, mode: S.send }; serialQueue(cmd); }
+  drawUi(outXy);
+  drawRendering();
+}
+
+// ---------------------------------------------------------------- colour rendering
+const CRI = makeCri(CRI_TABLES);
+// Predicted output spectrum: sum_i light_duty_i * g_i * spectrum_i(light_duty_i), knots
+// interpolated exactly as the C model interpolates its XYZ tables.
+function outputSpd() {
+  const n = MODEL_SPD.wl.length, out = new Array(n).fill(0);
+  for (let i = 0; i < 5; i++) {
+    const d = W.lt_eff_duty(i); if (!(d > 0)) continue;
+    const k = MODEL_SPD.knots[i], S = MODEL_SPD.spd[i], g = W.lt_out_sag(i);
+    let j = 1; while (j < k.length - 1 && d > k[j]) j++;
+    const t = Math.min(1, Math.max(0, (d - k[j - 1]) / (k[j] - k[j - 1])));
+    for (let w = 0; w < n; w++) out[w] += d * g * (S[j - 1][w] + t * (S[j][w] - S[j - 1][w]));
+  }
+  return out;
+}
+const riColor = v => v >= 90 ? "#3fae6a" : v >= 80 ? "#9bbf3a" : v >= 50 ? "#d39b2e" : "#c64a4a";
+function drawRendering() {
+  const spd = outputSpd(), r = spd.some(v => v > 0) ? CRI(spd) : null;
+  const show = r && !r.edge && Math.abs(r.duv) < 0.02;
+  $("criRa").textContent = show ? r.Ra.toFixed(1) : "—";
+  $("criR9").textContent = show ? r.R[8].toFixed(0) : "—";
+  $("criRa").style.color = show ? riColor(r.Ra) : "";
+  $("criR9").style.color = show ? riColor(r.R[8]) : "";
+  $("criCct").textContent = r && !r.edge ? `${Math.round(r.cct)} K / ${r.duv >= 0 ? "+" : ""}${r.duv.toFixed(4)}` : "—";
+  $("criWarn").textContent = !r ? "" : !show ? "not a white: CRI not defined"
+    : !r.valid ? "outside Duv ±0.0054: CRI only indicative" : "";
+
+  // R1..R14 bars
+  const bc = $("riBars").getContext("2d"), BW = 560, BH = 96;
+  bc.clearRect(0, 0, BW, BH);
+  const names = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14"];
+  const cw = BW / 14, base = BH - 16, top = 6, scale = v => (Math.max(-100, Math.min(100, v)) / 100) * (base - top);
+  bc.font = "10px ui-monospace, monospace"; bc.textAlign = "center";
+  bc.strokeStyle = "rgba(255,255,255,0.12)"; bc.beginPath(); bc.moveTo(0, base); bc.lineTo(BW, base); bc.stroke();
+  names.forEach((nm, i) => {
+    const x = i * cw;
+    bc.fillStyle = i < 8 ? "#8a93a3" : "#5d6573"; bc.fillText(nm, x + cw / 2, BH - 3);
+    if (!show) return;
+    const v = r.R[i], h = scale(v);
+    bc.fillStyle = riColor(v); bc.fillRect(x + 5, h >= 0 ? base - h : base, cw - 10, Math.abs(h));
+    bc.fillStyle = "#d8dce3"; bc.fillText(v.toFixed(0), x + cw / 2, Math.max(top + 8, (h >= 0 ? base - h : base) - 2));
+  });
+
+  // spectrum
+  const sc = $("spec").getContext("2d"), SW = 560, SH = 170, P = 22;
+  sc.clearRect(0, 0, SW, SH);
+  const wl = MODEL_SPD.wl, X = l => P + (l - 380) / 400 * (SW - 2 * P);
+  // rainbow strip
+  for (let l = 380; l < 780; l += 2) { sc.fillStyle = wlCss(l); sc.fillRect(X(l), SH - 14, X(l + 2) - X(l) + 0.5, 6); }
+  sc.fillStyle = "#8a93a3"; sc.font = "10px ui-monospace, monospace"; sc.textAlign = "center";
+  for (let l = 400; l <= 750; l += 50) sc.fillText(String(l), X(l), SH - 1);
+  if (!r) return;
+  // same luminance for the reference: scale by Y ratio
+  const ybar = CRI_TABLES.cmf[1], Ys = s => s.reduce((a, v, i) => a + v * ybar[i], 0);
+  const ref = r.ref.map(v => v * Ys(spd) / Ys(r.ref));
+  const mx = Math.max(...spd, ...(show ? ref : [0])) || 1, Y = v => SH - 18 - v / mx * (SH - 18 - 8);
+  sc.beginPath(); sc.moveTo(X(wl[0]), Y(0));
+  wl.forEach((l, i) => sc.lineTo(X(l), Y(spd[i]))); sc.lineTo(X(wl[wl.length - 1]), Y(0)); sc.closePath();
+  const grad = sc.createLinearGradient(X(380), 0, X(780), 0);
+  for (let l = 380; l <= 780; l += 20) grad.addColorStop((l - 380) / 400, wlCss(l, 0.55));
+  sc.fillStyle = grad; sc.fill();
+  sc.strokeStyle = "#e8ecf2"; sc.lineWidth = 1.5; sc.beginPath();
+  wl.forEach((l, i) => i ? sc.lineTo(X(l), Y(spd[i])) : sc.moveTo(X(l), Y(spd[i]))); sc.stroke();
+  if (show) {
+    sc.setLineDash([4, 3]); sc.strokeStyle = "rgba(255,255,255,0.55)"; sc.lineWidth = 1; sc.beginPath();
+    wl.forEach((l, i) => i ? sc.lineTo(X(l), Y(ref[i])) : sc.moveTo(X(l), Y(ref[i]))); sc.stroke(); sc.setLineDash([]);
+  }
+}
+function wlCss(l, a = 1) {
+  let r = 0, g = 0, b = 0;
+  if (l < 440) { r = (440 - l) / 60; b = 1; } else if (l < 490) { g = (l - 440) / 50; b = 1; }
+  else if (l < 510) { g = 1; b = (510 - l) / 20; } else if (l < 580) { r = (l - 510) / 70; g = 1; }
+  else if (l < 645) { r = 1; g = (645 - l) / 65; } else r = 1;
+  const f = l < 420 ? 0.3 + 0.7 * (l - 380) / 40 : l > 700 ? 0.3 + 0.7 * (780 - l) / 80 : 1;
+  return `rgba(${Math.round(r * f * 255)},${Math.round(g * f * 255)},${Math.round(b * f * 255)},${a})`;
+}
+
+// ---------------------------------------------------------------- serial
+const SER = { port: null, writer: null, inflight: false, pending: null, sent: "", rx: "", timer: 0 };
+function log(s) {
+  const el = $("log"); el.textContent += s; if (el.textContent.length > 20000) el.textContent = el.textContent.slice(-15000);
+  el.scrollTop = el.scrollHeight;
+}
+async function serialConnect() {
+  if (SER.port) { await serialClose(); return; }
+  try {
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    // keep DTR/RTS deasserted: the base station's auto-reset circuit hangs off them
+    await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+    SER.port = port; SER.writer = port.writable.getWriter();
+    $("connBtn").textContent = "Disconnect"; $("connState").textContent = "connected — syncing…";
+    readLoop(port);
+    SER.inflight = false; SER.sent = "";
+    await SER.writer.write(new TextEncoder().encode("\r"));
+  } catch (e) { $("connState").textContent = "error: " + e.message; }
+}
+async function serialClose() {
+  const port = SER.port; SER.port = null;
+  try { SER.reader && await SER.reader.cancel(); } catch (e) {}
+  try { SER.writer && SER.writer.releaseLock(); } catch (e) {}
+  try { await port.close(); } catch (e) {}
+  SER.writer = null; $("connBtn").textContent = "Connect…"; $("connState").textContent = "not connected";
+}
+async function readLoop(port) {
+  const dec = new TextDecoder();
+  while (port.readable && SER.port === port) {
+    SER.reader = port.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await SER.reader.read(); if (done) break;
+        const txt = dec.decode(value).replace(/\x1b\[[0-9;]*m/g, "");
+        // live setraw echoes flood the log while dragging; hide them unless asked
+        if (!(SER.curLive && !$("logLive").checked)) log(txt.replace(/\r/g, ""));
+        SER.rx += txt;
+        if (SER.rx.includes("base> ")) {
+          SER.rx = ""; SER.inflight = false; SER.curLive = false; clearTimeout(SER.timer);
+          $("connState").textContent = "connected";
+          pump();
+        }
+        if (SER.rx.length > 4096) SER.rx = SER.rx.slice(-256);
+      }
+    } catch (e) { log(`\n[read error: ${e.message}]\n`); break; }
+    finally { SER.reader.releaseLock(); }
+  }
+}
+// Two queues: live setraw is "latest wins" (one slot, repeats skipped) so slider drags
+// never pile up; typed console commands are a FIFO that goes first and is never skipped.
+const MANUAL = [];
+function serialQueue(cmd) { SER.pending = cmd; pump(); }
+function serialManual(cmd) { MANUAL.push(cmd); pump(); }
+async function pump() {
+  if (!SER.writer || SER.inflight) return;
+  let cmd;
+  if (MANUAL.length) {
+    cmd = MANUAL.shift();
+    SER.sent = "";   // a typed command may have changed the bulb: resend the next live frame
+    SER.curLive = false;
+  } else {
+    if (!SER.pending) return;
+    cmd = SER.pending; SER.pending = null;
+    if (cmd === SER.sent) return;
+    SER.sent = cmd;
+    SER.curLive = true;
+  }
+  SER.inflight = true;
+  SER.timer = setTimeout(() => { SER.inflight = false; $("connState").textContent = "connected (no prompt after last command)"; pump(); }, 1500);
+  try { await SER.writer.write(new TextEncoder().encode(cmd + "\r")); }
+  catch (e) { SER.inflight = false; log(`\n[write error: ${e.message}]\n`); }
+}
+async function serialReset() {
+  if (!SER.port) return;
+  await SER.port.setSignals({ dataTerminalReady: false, requestToSend: true });
+  await new Promise(r => setTimeout(r, 100));
+  await SER.port.setSignals({ dataTerminalReady: false, requestToSend: false });
+  SER.sent = ""; SER.inflight = true;
+  SER.timer = setTimeout(() => { SER.inflight = false; SER.writer && SER.writer.write(new TextEncoder().encode("\r")); }, 2500);
+}
+
+// ---------------------------------------------------------------- inputs
+function bindUi() {
+  const ui = $("ui");
+  const pick = e => {
+    const r = ui.getBoundingClientRect();
+    const [a, b] = fromPx((e.clientX - r.left) * SIZE / r.width, (e.clientY - r.top) * SIZE / r.height);
+    let h = ((Math.atan2(b, a) * 180 / Math.PI) % 360 + 360) % 360, C = Math.hypot(a, b);
+    if (e.shiftKey) {        // keep hue: project onto the current spoke
+      const t = LCH.h * Math.PI / 180; h = LCH.h; C = Math.max(0, a * Math.cos(t) + b * Math.sin(t));
+    } else if (e.altKey) {   // keep chroma: move around the current ring
+      C = LCH.C;
+    }
+    setLch(h, Math.min(C, maxChroma(h)));
+  };
+  ui.addEventListener("pointerdown", e => { ui.setPointerCapture(e.pointerId); pick(e); });
+  ui.addEventListener("pointermove", e => { if (e.buttons & 1) pick(e); });
+
+  $("hSlider").addEventListener("input", () => { const h = +$("hSlider").value; setLch(h, Math.min(LCH.C, maxChroma(h))); });
+  $("hNum").addEventListener("change", () => { const h = parseFloat($("hNum").value);
+    if (isFinite(h)) { const hh = ((h % 360) + 360) % 360; setLch(hh, Math.min(LCH.C, maxChroma(hh))); } });
+  $("cSlider").addEventListener("input", () => { setLch(LCH.h, Math.min(+$("cSlider").value / 1000 * C_SLIDER, maxChroma(LCH.h))); });
+  $("cNum").addEventListener("change", () => { const C = parseFloat($("cNum").value);
+    if (C >= 0) setLch(LCH.h, Math.min(C, maxChroma(LCH.h))); });
+
+  const onXy = () => { const x = parseFloat($("tx").value), y = parseFloat($("ty").value);
+    if (x > 0 && y > 0 && x + y < 1) { S.x = x; S.y = y; update(true); } };
+  $("tx").addEventListener("input", onXy); $("ty").addEventListener("input", onXy);
+  $("cctSlider").addEventListener("input", () => {
+    const T = sliderToCct(+$("cctSlider").value);
+    [S.x, S.y] = cctToXy(T); $("tcct").value = Math.round(T); update("cct"); });
+  $("tcct").addEventListener("change", () => { const T = parseFloat($("tcct").value);
+    if (T >= 1700 && T <= 25000) {
+      [S.x, S.y] = cctToXy(T); $("cctSlider").value = cctToSlider(Math.min(CCT_MAX, T)); update("cct"); } });
+  $("bSlider").addEventListener("input", () => { S.lm = sliderToLm(+$("bSlider").value); update(); scheduleReach(); });
+  $("bNum").addEventListener("change", () => { const b = parseFloat($("bNum").value); if (b >= 0) { S.lm = b; update(); scheduleReach(); } });
+  $("fSlider").addEventListener("input", () => { S.F = $("fSlider").value / 100; update(); scheduleReach(); });
+  // A new range while live: stop the old one first (lt entries outside the new range
+  // would otherwise keep broadcasting), then the next update addresses the new range.
+  const onRange = () => {
+    const t = target(), o = LIVE_TARGET;
+    if (S.live && SER.writer && o && (o.first !== t.first || o.last !== t.last)) {
+      if (o.mode === "lt") serialManual(stopCmdFor(o, "lt"));
+      SER.sent = "";
+    }
+    update();
+  };
+  $("bulbId").addEventListener("change", onRange);
+  $("bulbLast").addEventListener("change", onRange);
+
+  const dm = W.lt_duty_max(), lightOf = d => [0, 1, 2].map(k => W.lt_forward_xyz(...d, k));
+  const presets = [
+    ["rated: WW+CW at cap", () => xyOf(lightOf([0, 0, 0, dm, dm])), lightOf([0, 0, 0, dm, dm])[1] * W.lt_lm_per_y(), 1],
+    ["WW LED at cap", () => xyOf(lightOf([0, 0, 0, dm, 0])), lightOf([0, 0, 0, dm, 0])[1] * W.lt_lm_per_y(), 1],
+    ["CW LED", () => PRIM[4], 500, 1],
+    ["2700K", () => cctToXy(2700), 480, 1], ["4000K", () => cctToXy(4000), 600, 1], ["6500K", () => cctToXy(6500), 600, 1],
+    // single colours top out far below the whites: red ~48 lm, green ~120, blue ~28
+    ["red", () => PRIM[0], 30, 0], ["amber", () => [0.56, 0.42], 180, 0.5], ["green", () => PRIM[1], 72, 0],
+    ["blue", () => PRIM[2], 15, 0], ["pink", () => [0.38, 0.27], 90, 0.5],
+    ["red night light", () => PRIM[0], 0.5, 0], ["candle", () => cctToXy(1900), 6, 1],
+  ];
+  presets.forEach(([name, xy, lm, F]) => { const b = document.createElement("button"); b.textContent = name;
+    b.onclick = () => { [S.x, S.y] = xy(); S.lm = lm; S.F = F; update(); scheduleReach(); };
+    $("presets").appendChild(b); });
+
+  const toggle = (id, key, after) => $(id).addEventListener("click", () => { S[key] = !S[key];
+    $(id).classList.toggle("on", S[key]); after && after(); });
+  toggle("reachBtn", "reach", drawReach);
+  toggle("locusBtn", "locus", () => update());
+  $("liveBtn").addEventListener("click", () => { S.live = !S.live; $("liveBtn").classList.toggle("on", S.live);
+    $("liveBtn").textContent = "Live send: " + (S.live ? "on" : "off"); SER.sent = ""; update(); });
+  $("offBtn").addEventListener("click", () => { S.live = false; $("liveBtn").classList.remove("on");
+    $("liveBtn").textContent = "Live send: off";
+    serialQueue(stopCmdFor(LIVE_TARGET && LIVE_TARGET.mode === S.send ? LIVE_TARGET : target(), S.send));
+    LIVE_TARGET = null; });
+  // switching modes stops the other path first, so only one packet type drives the bulb
+  $("sendMode").addEventListener("change", () => {
+    const was = S.send; S.send = $("sendMode").value;
+    if (S.live && SER.writer) serialManual(stopCmdFor(LIVE_TARGET || target(), was));
+    SER.sent = ""; update(); });
+  $("connBtn").addEventListener("click", serialConnect);
+
+  // console: Enter / Send queues the line; ↑/↓ walk the history (kept across reloads)
+  const HIST_KEY = "lemtone_tool.console_history";
+  let hist = []; try { hist = JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); } catch (e) {}
+  let hIdx = hist.length, draft = "";
+  const sendLine = () => {
+    const line = $("conIn").value.trim();
+    if (!line) return;
+    if (!SER.writer) { log(`\n[not connected: ${line}]\n`); return; }
+    if (hist[hist.length - 1] !== line) { hist.push(line); hist = hist.slice(-100); }
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(hist)); } catch (e) {}
+    hIdx = hist.length; draft = "";
+    $("conIn").value = "";
+    serialManual(line);
+  };
+  $("conSend").addEventListener("click", sendLine);
+  $("conIn").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); sendLine(); }
+    else if (e.key === "ArrowUp" && hIdx > 0) {
+      if (hIdx === hist.length) draft = $("conIn").value;
+      $("conIn").value = hist[--hIdx]; e.preventDefault();
+    } else if (e.key === "ArrowDown" && hIdx < hist.length) {
+      $("conIn").value = ++hIdx === hist.length ? draft : hist[hIdx]; e.preventDefault();
+    }
+  });
+  $("logClear").addEventListener("click", () => { $("log").textContent = ""; });
+  $("resetBtn").addEventListener("click", serialReset);
+  if (!("serial" in navigator)) { $("noSerial").hidden = false; $("connBtn").disabled = true; $("resetBtn").disabled = true;
+    $("conIn").disabled = true; $("conSend").disabled = true; }
+
+  // period config
+  const cfgIds = ["cNmin", "cNmax", "cRes", "cB1", "cN1", "cB2", "cN2"];
+  $("cNmin").value = W.lt_cfg_n_min(); $("cNmax").value = W.lt_cfg_n_max(); $("cRes").value = W.lt_cfg_res_ticks();
+  $("cB1").value = W.lt_cfg_tier_lm(0).toFixed(0); $("cN1").value = W.lt_cfg_tier_n(0);
+  $("cB2").value = W.lt_cfg_tier_lm(1).toFixed(0); $("cN2").value = W.lt_cfg_tier_n(1);
+  cfgIds.forEach(id => $(id).addEventListener("change", () => {
+    const v = cfgIds.map(k => parseFloat($(k).value));
+    if (v.some(x => !isFinite(x))) return;
+    W.lt_set_period_cfg(v[0] | 0, v[1] | 0, v[2] | 0, v[3], v[4] | 0, v[5], v[6] | 0);
+    update();
+  }));
+  $("fixedN").addEventListener("change", () => { W.lt_fixed_period(parseInt($("fixedN").value, 10)); update(); });
+}
+
+// ---------------------------------------------------------------- boot
+(async () => {
+  const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  W = instance.exports; W.lt_init();
+  const mem = new Uint8Array(W.memory.buffer); let p = W.lt_model_id(), id = "";
+  while (mem[p]) id += String.fromCharCode(mem[p++]);
+  $("modelId").textContent = `model ${id} · ${W.lt_lm_per_y().toFixed(4)} lm per Y (1000 lm rated at WW+CW cap) · pulse ` +
+    CH.map((c, i) => `${c} ${W.lt_pulse_us(i).toFixed(2)}`).join(" ") + " µs";
+  PRIM = CH.map((c, i) => { const d = [0, 0, 0, 0, 0]; d[i] = 0.4; return xyOf([0, 1, 2].map(k => W.lt_forward_xyz(...d, k))); });
+  R = Math.max(0.3, ...PRIM.map(p => Math.max(...xyToPlane(...p).map(Math.abs)))) * 1.12;
+  let widest = 0;
+  for (let h = 0; h < 360; h += 5) widest = Math.max(widest, bulbChroma(h));
+  C_SLIDER = Math.ceil(widest * 1.15 * 20) / 20;
+  [S.x, S.y] = cctToXy(2700);
+  drawBackground();
+  bindUi();
+  update();
+  drawReach();
+})();
+</script>
+</body>
+</html>

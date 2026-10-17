@@ -217,3 +217,38 @@ struct PreciseLightUpdate {
     period_cw: u8,
 }
 ```
+
+## `0x07` - LemtoneUpdate
+
+LemtoneUpdate sets bulbs to a **Lemtone value**: a device-independent description of the light, which each bulb turns into its own PWM duties and periods with its calibrated model (the Lemtone solver, `bulb-firmware/lemtone/`). Same table shape as LightUpdateV2: the first entry with the bulb's id wins.
+
+```
+struct LemtoneUpdate {
+    entry_count: u8, // max of 11 (2 + 11 * 6 = 68 bytes, within the 70-byte body limit)
+    entries: [LemtoneEntry; entry_count],
+}
+
+struct LemtoneEntry {
+    bulb_id: u8,
+    value: u40, // little-endian, 5 bytes; bit fields from the least significant bit:
+                //   bits  0..10  a    (11 bits)
+                //   bits 11..21  b    (11 bits)
+                //   bits 22..33  lum  (12 bits)
+                //   bits 34..39  F    ( 6 bits)
+}
+```
+
+Decoding (all to floats; the solver never sees the codes):
+
+| field | value | range / step |
+|---|---|---|
+| `a` | `(code - 1046) * 0.0008` | -0.837 .. 0.801 |
+| `b` | `(code - 1424) * 0.0008` | -1.139 .. 0.498 |
+| `lum` | lumens = `2^((code - 2048) / 160)`; code 0 = off | 1.4e-4 .. 7100 lm, 0.43% per step |
+| `F` | `code / 63` | 0 .. 1 |
+
+- `a`, `b`: OKLab chromaticity, i.e. the colour's OKLab a and b at lightness L = 1 (a/L, b/L), independent of brightness. Real colours span about a -0.83..0.79, b -1.12..0.27. The 0.0008 step is at most ~0.4 MacAdam steps. A colour the bulb cannot make (including imaginary ones) is desaturated along the OKLab line toward the bulb's white line, keeping the lumens; a brightness it cannot reach is clamped.
+- `lum`: luminous flux in lumens. (Bulbs are currently calibrated against the Kauf 1000 lm rating, taken as warm + cold white both at the 80% cap.)
+- `F`: fidelity. 1 builds an unsaturated colour from the whites as much as possible (broadest spectrum, best colour rendering), 0 from RGB (narrowest). It never changes the colour or the lumens, only how the spectrum is made.
+
+The base station repeats the table every interval; a bulb drops an entry identical to the one it last applied (compared on the raw 40 bits) and only uses it to hold off the fallback timeout. A bulb should be driven by one packet type at a time: any other colour packet for it (0x02, 0x03, 0x06) replaces the Lemtone value, and the next LemtoneUpdate is applied in full.

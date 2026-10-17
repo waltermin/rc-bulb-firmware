@@ -123,6 +123,23 @@
 #define PWM_DEBUG_DUMP 0
 #endif
 
+// ---- Lemtone (0x07) ---------------------------------------------------------
+// When 1, the controller logs every Lemtone solve: mode, model evaluations, solve and
+// PWM-publish time in us, and the controller task's free stack. For the on-bulb
+// performance trials; set 0 once the numbers are known.
+#ifndef LEMTONE_TIMING_LOG
+#define LEMTONE_TIMING_LOG 1
+#endif
+
+// When 1, a self-test task runs once after boot (selftest.c): the Lemtone reference
+// vectors and timing on this chip, then 0x07 frames injected through the real RX ->
+// controller path with a visible colour sequence, all reported on the console. The bulb
+// works normally afterwards. Set by the build (BULB_SELFTEST=1 in the environment of
+// build.ps1); keep 0 for shipped images.
+#ifndef LEMTONE_SELFTEST
+#define LEMTONE_SELFTEST 0
+#endif
+
 // Fraction of full scale the LEDs are allowed to reach (stock caps at 80%).
 #define PWM_MAX_POWER 0.80f
 
