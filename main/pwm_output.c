@@ -121,6 +121,11 @@ static volatile bool     s_update_pending;  // inactive buffer holds a newer sch
 static volatile uint16_t s_idx;             // next entry the ISR will apply
 static volatile bool     s_running;         // timer armed / engine started
 
+// Compiler barrier for the handoff in publish_reqs: keeps the flag accesses and the
+// schedule writes in program order. Both chips are single-core, so program order is
+// all the ISR needs.
+#define PWM_BARRIER() __asm__ __volatile__("" ::: "memory")
+
 // Timer tick at which the ISR should apply the edge s_idx points at, in the
 // CURRENT epoch. The ISR advances it by each edge's gap, then hands it to
 // pwm_tmr_arm_rebase(), which returns it re-expressed in whatever epoch exists
@@ -269,24 +274,42 @@ static bool reqs_equal(const pwm_chan_req_t *a, const pwm_chan_req_t *b) {
 
 // Compile per-channel requests into a schedule and publish it to the ISR.
 //
-// Single producer (controller/dfu2 task, or init): while we compile,
-// s_update_pending is false, so the ISR never swaps s_active out from under us and
-// the inactive buffer is stable. That invariant -- not the critical section below
-// -- is what makes the handoff safe, which matters because on the C3 the ISR runs
-// at priority 4 and PWM_ENTER_CRITICAL does NOT hold it off.
+// Single producer (controller/dfu2 task, or init). The ISR only swaps when
+// s_update_pending is set, so we first withdraw any schedule it hasn't taken yet:
+// from then until we set the flag again, s_active can't change under us, and
+// s_active ^ 1 is neither playing nor about to play. That invariant -- not the
+// critical section below -- is what makes the handoff safe, which matters because
+// on the C3 the ISR runs at priority 4 and PWM_ENTER_CRITICAL does NOT hold it off.
+//
+// Withdrawing matters when a second schedule is published before the ISR has taken
+// the first (e.g. 100 Hz updates into a 2^14 us cycle). Without it, the second
+// compile overwrote the very buffer the ISR was about to swap to; a swap landing
+// mid-compile played that half-written table, the next wrap swapped back to the
+// schedule from two publishes earlier, and the repeat filters then kept it there.
 static void publish_reqs(const pwm_chan_req_t *reqs) {
     if (s_have_last_reqs && reqs_equal(reqs, s_last_reqs)) {
         return;
     }
 
-    const uint8_t target = s_running ? (uint8_t)(s_active ^ 1) : s_active;
+    uint8_t target = s_active;
+    if (s_running) {
+        // Clear the flag before reading s_active: if the ISR took the old flag just
+        // before this store, s_active already names that buffer and we write the other.
+        s_update_pending = false;
+        PWM_BARRIER();
+        target = (uint8_t)(s_active ^ 1);
+    }
     if (!pwm_compile(reqs, PWM_CHANNELS, &s_sched[target])) {
+        // A schedule withdrawn above is gone too; forget it, so its next repeat is
+        // compiled again instead of filtered out.
+        s_have_last_reqs = false;
         ESP_LOGW(TAG, "pwm_compile overflow; keeping previous frame");
         return;
     }
     memcpy(s_last_reqs, reqs, sizeof s_last_reqs);
     s_have_last_reqs = true;
 
+    PWM_BARRIER();  // the table is complete before the ISR can see the flag
     PWM_ENTER_CRITICAL();
     if (s_running) {
         s_update_pending = true;  // ISR swaps to `target` at the next wrap
