@@ -21,7 +21,7 @@
 #define DEFAULT_LED 0
 
 // Per-packet-type fallback window: revert an output to its DEFAULT if no
-// packet of its type (0x06 relay / 0x07 LED) is heard within this. (KV)
+// packet of its type (0x40 relay / 0x41 LED) is heard within this. (KV)
 #define FALLBACK_TIMEOUT_MS 15000
 
 // Fixed 802.11 channel the base station broadcasts on and we sniff on. (KV)

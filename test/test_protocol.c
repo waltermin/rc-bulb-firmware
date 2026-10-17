@@ -226,13 +226,30 @@ static void test_dfu2(void) {
 // ---- bulb color packets are valid no-ops -------------------------------------
 
 static void test_bulb_packets_ignored(void) {
-    uint8_t frame[512];
+    uint8_t frame[512], body_big[64];
     // LightUpdateV2 with one entry for id 12
     uint8_t body[] = {PROTO_TAG_LIGHT_UPDATE_V2, 1, /*entry*/12, 255, 0, 0, 0, 0};
     size_t fl = build_beacon(frame, body, sizeof body, false, false);
     relay_parse_result_t r = protocol_parse_beacon(frame, fl, 12);
     CHECK(r.valid);
     CHECK(!r.has_relay && !r.has_led && !r.is_command && !r.dfu2_requested);
+
+    // RawLightUpdate (0x06, bulb-only): tag + id + 5*f32 + 5*u8 = 27 bytes, all
+    // bits set so a misparse as a relay bitfield would turn the relay on.
+    uint8_t raw[27];
+    memset(raw, 0xFF, sizeof raw);
+    raw[0] = PROTO_TAG_RAW_LIGHT_UPDATE;
+    fl = build_beacon(frame, raw, sizeof raw, false, false);
+    r = protocol_parse_beacon(frame, fl, 12);
+    CHECK(r.valid);
+    CHECK(!r.has_relay && !r.has_led && !r.is_command && !r.dfu2_requested);
+
+    // A full 33-byte bitfield under the bulb's 0x06 tag must not drive the relay
+    // either: relay packets live at 0x40/0x41, never at a bulb tag.
+    relays_body(body_big, PROTO_TAG_RAW_LIGHT_UPDATE, 12, true);
+    fl = build_beacon(frame, body_big, PROTO_RELAYS_PKT_SIZE, false, false);
+    r = protocol_parse_beacon(frame, fl, 12);
+    CHECK(!r.has_relay && !r.has_led);
 }
 
 // ---- controller ---------------------------------------------------------------

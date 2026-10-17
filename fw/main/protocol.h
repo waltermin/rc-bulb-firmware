@@ -20,15 +20,15 @@
 //
 // Packet tags this device acts on:
 //
-//   0x06 RelaysUpdate — desired relay state for the whole shared id space:
+//   0x40 RelaysUpdate — desired relay state for the whole shared id space:
 //     struct RelaysUpdatePacket {
-//       u8 packet_tag;          // 0x06
+//       u8 packet_tag;          // 0x40
 //       u8 relay_states[32];    // bit N = desired relay state of device id N
 //     }                         // bit N at relay_states[N/8], bit N%8 (LSB-first)
 //
-//   0x07 RelaysLedUpdate — same, but drives the status LED:
+//   0x41 RelaysLedUpdate — same, but drives the status LED:
 //     struct RelaysLedUpdatePacket {
-//       u8 packet_tag;          // 0x07
+//       u8 packet_tag;          // 0x41
 //       u8 led_states[32];
 //     }
 //
@@ -41,7 +41,7 @@
 //        and treat other types as valid-but-not-ours. (The field was formerly
 //        fmt_version == 0x01, which now denotes "KAUF bulb".)
 //
-// Color packets (0x01/0x02/0x03) are recognized as ecosystem frames (valid =
+// Color packets (0x01/0x02/0x03/0x06) are recognized as ecosystem frames (valid =
 // true, so diagnostics can count them) but carry no effect for a relay.
 
 #ifndef RELAY_PROTOCOL_H
@@ -75,8 +75,9 @@ extern "C" {
 #define PROTO_TAG_LIGHT_UPDATE_V2 0x03u       // bulbs only
 #define PROTO_TAG_BULB_COMMAND 0x04u          // shared remote management
 #define PROTO_TAG_DFU2_REQUEST 0x05u          // pull-based OTA advertisement
-#define PROTO_TAG_RELAYS_UPDATE 0x06u         // relay-state bitfield
-#define PROTO_TAG_RELAYS_LED_UPDATE 0x07u     // LED-state bitfield
+#define PROTO_TAG_RAW_LIGHT_UPDATE 0x06u      // bulbs only (raw duties + PWM periods)
+#define PROTO_TAG_RELAYS_UPDATE 0x40u         // relay-state bitfield
+#define PROTO_TAG_RELAYS_LED_UPDATE 0x41u     // LED-state bitfield
 #define PROTO_TAG_SIZE 1u
 
 // Dfu2Request device types (first payload byte, formerly fmt_version).
@@ -113,7 +114,7 @@ extern "C" {
 typedef struct {
     bool valid;          // frame is a well-formed packet for our protocol
 
-    // RelaysUpdate (0x06) / RelaysLedUpdate (0x07): my bit from the bitfield.
+    // RelaysUpdate (0x40) / RelaysLedUpdate (0x41): my bit from the bitfield.
     bool has_relay;      // a RelaysUpdate was decoded; relay_state holds my bit
     bool relay_state;
     bool has_led;        // a RelaysLedUpdate was decoded; led_state holds my bit

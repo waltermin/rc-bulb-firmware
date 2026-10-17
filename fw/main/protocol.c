@@ -42,7 +42,7 @@ static inline uint32_t read_u32_le(const uint8_t *p) {
 // Each receives `pkt` pointing at the packet tag byte and `pkt_len` bytes
 // available from the tag through the end of the IE payload.
 
-// 0x06 / 0x07: [tag, bitfield(32)]. My state is bit my_id of the bitfield,
+// 0x40 / 0x41: [tag, bitfield(32)]. My state is bit my_id of the bitfield,
 // LSB-first within each byte.
 static relay_parse_result_t parse_relays_update(const uint8_t *pkt, size_t pkt_len,
                                                 uint8_t my_id, bool is_led) {
@@ -249,7 +249,8 @@ relay_parse_result_t protocol_parse_beacon(const uint8_t *frame, size_t frame_le
             return parse_dfu2_request(pkt, pkt_len, my_id);
         case PROTO_TAG_LIGHT_UPDATE:
         case PROTO_TAG_PRECISE_LIGHT_UPDATE:
-        case PROTO_TAG_LIGHT_UPDATE_V2: {
+        case PROTO_TAG_LIGHT_UPDATE_V2:
+        case PROTO_TAG_RAW_LIGHT_UPDATE: {
             // Bulb color packets: valid ecosystem frames, no effect on a relay.
             relay_parse_result_t out = INVALID;
             out.valid = true;

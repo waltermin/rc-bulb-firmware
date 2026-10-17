@@ -36,14 +36,25 @@ uint32_t bkBaud = 115200;
 
 static uint8_t txChannel = 11;
 static bool wifiUp = false;
-static uint8_t relayBits[32];    // 0x06 RelaysUpdate bitfield state
-static uint8_t ledBits[32];      // 0x07 RelaysLedUpdate bitfield state
+static wifi_interface_t g_txIf = WIFI_IF_STA;  // beacon TX interface (AP when softAP up)
+static bool g_passthrough = false;  // echo BK UART1 -> USB (see switch logs during tests)
+
+// ---- DFU2 test server: softAP + TCP server serving an RBL to the switch ------
+static uint8_t *g_rbl = NULL;      // RBL image (in PSRAM), served over TCP
+static uint32_t g_rblSize = 0;
+static uint8_t g_rblSha[32];       // sha256(RBL) for the DFU2 header
+static uint8_t g_dfuBuildId[8];    // advertised/served build id
+static WiFiServer g_dfuServer(3333);
+static bool g_dfuServerActive = false;
+static uint8_t relayBits[32];    // 0x40 RelaysUpdate bitfield state
+static uint8_t ledBits[32];      // 0x41 RelaysLedUpdate bitfield state
 static uint32_t autoPeriodMs = 0;  // 0 = auto-broadcast off
 static uint32_t autoLastMs = 0;
 
 static void wifiTxInit() {
   if (wifiUp) return;
   WiFi.mode(WIFI_STA);
+  g_txIf = WIFI_IF_STA;
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_channel(txChannel, WIFI_SECOND_CHAN_NONE);
   wifiUp = true;
@@ -57,7 +68,7 @@ static int sendBeacon(const uint8_t *body, size_t bodyLen) {
   esp_wifi_set_channel(txChannel, WIFI_SECOND_CHAN_NONE);
 
   uint8_t mac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, mac);
+  esp_wifi_get_mac(g_txIf, mac);
 
   uint8_t f[128];
   size_t o = 0;
@@ -76,7 +87,7 @@ static int sendBeacon(const uint8_t *body, size_t bodyLen) {
   memcpy(f + o, body, bodyLen);
   o += bodyLen;
 
-  return esp_wifi_80211_tx(WIFI_IF_STA, f, o, true);
+  return esp_wifi_80211_tx(g_txIf, f, o, true);
 }
 
 static int sendBitfield(uint8_t tag, const uint8_t *bits) {
@@ -297,6 +308,62 @@ static void handleLine(String line) {
     Serial.println("FLASHMODE OK ENTERING BRIDGE");
     Serial.flush();
     bridgeLoop(true);  // never returns (exit magic restarts the ESP)
+  } else if (cmd == "PASS") {
+    arg.toUpperCase();
+    g_passthrough = (arg == "ON" || arg.length() == 0);
+    Serial.printf("PASS %s OK\r\n", g_passthrough ? "ON" : "OFF");
+  } else if (cmd == "DFULOAD") {
+    // DFULOAD <size> <sha256hex> <buildidhex> ; then stream <size> raw bytes
+    long sz = 0; String shaHex, bidHex;
+    int a1 = arg.indexOf(' '); int a2 = arg.indexOf(' ', a1 + 1);
+    if (a1 < 0 || a2 < 0) { Serial.println("ERR DFULOAD <size> <sha> <buildid>"); return; }
+    sz = arg.substring(0, a1).toInt();
+    shaHex = arg.substring(a1 + 1, a2); shaHex.trim();
+    bidHex = arg.substring(a2 + 1); bidHex.trim();
+    if (g_rbl) { free(g_rbl); g_rbl = NULL; }
+    g_rbl = (uint8_t *)ps_malloc(sz);
+    if (!g_rbl) { Serial.println("ERR ps_malloc failed"); return; }
+    // parse sha + build id
+    for (int i = 0; i < 32; i++) g_rblSha[i] = (hexNib(shaHex[2*i]) << 4) | hexNib(shaHex[2*i+1]);
+    for (int i = 0; i < 8; i++)  g_dfuBuildId[i] = (hexNib(bidHex[2*i]) << 4) | hexNib(bidHex[2*i+1]);
+    g_rblSize = sz;
+    Serial.printf("DFULOAD ready for %ld bytes, send now\r\n", sz);
+    Serial.flush();
+    // read sz raw bytes from serial
+    uint32_t got = 0; uint32_t t0 = millis();
+    while (got < (uint32_t)sz && millis() - t0 < 120000) {
+      int n = Serial.available();
+      if (n > 0) { size_t want = (size_t)((uint32_t)sz - got); if ((size_t)n < want) want = (size_t)n; n = Serial.read(g_rbl + got, want); got += n; t0 = millis(); }
+    }
+    Serial.printf("DFULOAD got %lu/%ld %s\r\n", got, sz, got == (uint32_t)sz ? "OK" : "TIMEOUT");
+  } else if (cmd == "DFUAP") {
+    // start softAP "RC-Update" on the switch's channel + TCP server on 3333
+    WiFi.mode(WIFI_AP);
+    wifiUp = true;
+    g_txIf = WIFI_IF_AP;
+    WiFi.softAP("RC-Update", "", txChannel);
+    g_dfuServer.begin();
+    g_dfuServerActive = true;
+    Serial.printf("DFUAP up: SSID RC-Update ch%d ip=%s server:3333\r\n",
+                  txChannel, WiFi.softAPIP().toString().c_str());
+  } else if (cmd == "DFU2BC") {
+    // broadcast a 0x05 Dfu2Request: device_type=relay, id range, server=AP ip, RC-Update
+    int id = arg.length() ? arg.toInt() : 5;
+    IPAddress ip = WiFi.softAPIP();  // 192.168.4.1
+    uint8_t body[80]; int o = 0;
+    body[o++] = 0x05;            // tag
+    body[o++] = 0x02;            // device_type = relay
+    body[o++] = (uint8_t)id;     // id_start
+    body[o++] = 0x00;            // id_bounds
+    body[o++] = ip[0]; body[o++] = ip[1]; body[o++] = ip[2]; body[o++] = ip[3];
+    body[o++] = 3333 & 0xFF; body[o++] = (3333 >> 8) & 0xFF;   // port LE
+    body[o++] = 8;               // build_id_len
+    for (int i = 0; i < 8; i++) body[o++] = g_dfuBuildId[i];
+    const char *ss = "RC-Update";
+    body[o++] = 9; for (int i = 0; i < 9; i++) body[o++] = ss[i];  // ssid
+    body[o++] = 0;               // pass_len (open)
+    int err = sendBeacon(body, o);
+    Serial.printf("DFU2BC id=%d ip=%s err=%d %s\r\n", id, ip.toString().c_str(), err, err == 0 ? "OK" : "FAIL");
   } else if (cmd == "NET") {
     // NET <ssid> [pass] — join an AP as STA (for talking to OpenBeken's web API)
     String ssid = arg, pass = "";
@@ -350,7 +417,7 @@ static void handleLine(String line) {
     }
   } else if (cmd == "RELAYS" || cmd == "RELAYSLED") {
     uint8_t *bits = (cmd == "RELAYS") ? relayBits : ledBits;
-    uint8_t tag = (cmd == "RELAYS") ? 0x06 : 0x07;
+    uint8_t tag = (cmd == "RELAYS") ? 0x40 : 0x41;
     if (arg.length() && !applyBitSpec(bits, arg)) {
       Serial.println("ERR bad bitspec (want id:val,id:val,...)");
       return;
@@ -431,8 +498,50 @@ void loop() {
   }
   if (autoPeriodMs && millis() - autoLastMs >= autoPeriodMs) {
     autoLastMs = millis();
-    sendBitfield(0x06, relayBits);
-    sendBitfield(0x07, ledBits);
+    sendBitfield(0x40, relayBits);
+    sendBitfield(0x41, ledBits);
+  }
+
+  // Passthrough: relay BK UART1 (switch logs) to USB so they're visible in tests.
+  if (g_passthrough) {
+    while (Serial1.available()) Serial.write(Serial1.read());
+  }
+
+  // DFU2 test server: serve the header + RBL to a connecting switch.
+  if (g_dfuServerActive && g_rbl && g_rblSize) {
+    WiFiClient c = g_dfuServer.available();
+    if (c) {
+      Serial.println("DFU2: client connected");
+      uint8_t hello[14];
+      uint32_t t0 = millis(); int got = 0;
+      while (got < 14 && millis() - t0 < 5000) {
+        if (c.available()) hello[got++] = c.read();
+      }
+      Serial.printf("DFU2: hello %d bytes (id=%d)\r\n", got, got >= 6 ? hello[5] : -1);
+      // header: magic("RClh" LE) | ver | image_len LE | sha256[32] | build_id[8]
+      uint8_t hdr[49]; int o = 0;
+      hdr[o++] = 0x52; hdr[o++] = 0x43; hdr[o++] = 0x6C; hdr[o++] = 0x68;  // "RClh" = 0x686C4352
+      hdr[o++] = 0x01;
+      hdr[o++] = g_rblSize & 0xFF; hdr[o++] = (g_rblSize >> 8) & 0xFF;
+      hdr[o++] = (g_rblSize >> 16) & 0xFF; hdr[o++] = (g_rblSize >> 24) & 0xFF;
+      memcpy(hdr + o, g_rblSha, 32); o += 32;
+      memcpy(hdr + o, g_dfuBuildId, 8); o += 8;
+      c.write(hdr, 49);
+      // stream the RBL
+      uint32_t sent = 0;
+      while (sent < g_rblSize && c.connected()) {
+        uint32_t chunk = min((uint32_t)2048, g_rblSize - sent);
+        int w = c.write(g_rbl + sent, chunk);
+        if (w <= 0) break;
+        sent += w;
+      }
+      Serial.printf("DFU2: sent %lu/%lu bytes\r\n", sent, g_rblSize);
+      // read the 1-byte status reply
+      t0 = millis(); int st = -1;
+      while (millis() - t0 < 5000) { if (c.available()) { st = c.read(); break; } }
+      Serial.printf("DFU2: switch status=%d %s\r\n", st, st == 0 ? "(OK, rebooting)" : "");
+      c.stop();
+    }
   }
   delay(1);
 }

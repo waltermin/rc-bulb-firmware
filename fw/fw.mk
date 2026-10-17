@@ -22,3 +22,9 @@ APP_C += $(OBK_DIR)/main/controller.c
 APP_C += $(OBK_DIR)/main/user_main.c
 APP_C += $(OBK_DIR)/main/glue.c
 APP_C += $(OBK_DIR)/main/dfu2.c
+APP_C += $(OBK_DIR)/main/settings.c
+
+# The SDK's weak BLE stubs (ble_ctrl, ble_coex_pta_is_on, ...). BLE is off
+# (CFG_SUPPORT_BLE=0), but the prebuilt librwnx/libcal still reference these;
+# OpenBeken.mk compiles this file and we replaced OpenBeken.mk.
+APP_C += ./fixes/blank.c

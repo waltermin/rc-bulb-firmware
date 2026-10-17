@@ -60,6 +60,11 @@ extern unsigned int flash_write(char *buf, unsigned int count, unsigned int addr
 extern unsigned int flash_ctrl(unsigned int cmd, void *parm);
 extern void flash_protection_op(unsigned char mode, unsigned char type);
 extern void bk_reboot(void);
+// Reboot signalling POWERON (0) so the v1.0.15 bootloader runs its rt_ota check
+// and swaps the download partition; a plain bk_reboot() (RESET_SOURCE_REBOOT=1)
+// boots the app directly without checking for an update.
+extern void bk_reboot_with_type(int type);
+#define RCSW_RESET_POWERON 0
 
 static volatile int g_dfu_active = 0;
 int dfu2_in_progress(void) { return g_dfu_active; }
@@ -84,6 +89,9 @@ static unsigned int g_sectorlen;
 static unsigned int g_addr;
 
 static void store_sector(unsigned int addr, uint8_t *data) {
+    // Hard bound: this writer must never touch flash outside the download
+    // partition, regardless of what the length checks upstream concluded.
+    if (addr < DFU2_OTA_ADDR || addr >= DFU2_OTA_LIMIT) return;
     flash_ctrl(CMD_FLASH_WRITE_ENABLE, (void *)0);
     flash_ctrl(CMD_FLASH_ERASE_SECTOR, &addr);
     flash_ctrl(CMD_FLASH_WRITE_ENABLE, (void *)0);
@@ -110,6 +118,10 @@ static void ota_add(const uint8_t *data, int len) {
             store_sector(g_addr, g_sector);
             g_addr += SECTOR_SIZE;
             g_sectorlen = 0;
+            // A 4K erase+write runs with interrupts disabled for tens of ms;
+            // yield so the wifi stack can drain its RX queue and keep the TCP
+            // connection alive (matches OpenBeken's OTA writer).
+            rtos_delay_milliseconds(10);
         }
     }
 }
@@ -197,15 +209,22 @@ static int run_pull(uint8_t my_id, const dfu2_params_t *p) {
 
     int status = DFU_ST_BAD_HEADER;
     uint8_t hdr[DFU2_HDR_LEN];
-    if (recv_exact(s, hdr, sizeof(hdr))) {
+    int hgot = recv_exact(s, hdr, sizeof(hdr));
+    if (hgot) {
         uint32_t magic = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
         uint8_t ver = hdr[4];
         uint32_t image_len = (uint32_t)hdr[5] | ((uint32_t)hdr[6] << 8) | ((uint32_t)hdr[7] << 16) | ((uint32_t)hdr[8] << 24);
         const uint8_t *sha = &hdr[9];
         const uint8_t *served_id = &hdr[9 + 32];
+        bk_printf("dfu2: hdr magic=%08x ver=%d len=%u limit_ok=%d\r\n",
+                  (unsigned)magic, ver, (unsigned)image_len,
+                  image_len <= (DFU2_OTA_LIMIT - DFU2_OTA_ADDR));
 
+        // Bound as a subtraction: the additive form (ADDR + image_len > LIMIT)
+        // wraps mod 2^32 for huge server-supplied lengths and PASSES the check,
+        // letting the sector writer run past the partition (RF cal, bootloader).
         if (magic != DFU2_HDR_MAGIC || ver != DFU2_HDR_VERSION || image_len == 0 ||
-            (DFU2_OTA_ADDR + image_len) > DFU2_OTA_LIMIT) {
+            image_len > (DFU2_OTA_LIMIT - DFU2_OTA_ADDR)) {
             status = DFU_ST_BAD_HEADER;
         } else if (memcmp(served_id, p->build_id, p->build_id_len) != 0) {
             status = DFU_ST_BUILD_ID;
@@ -219,10 +238,17 @@ static int run_pull(uint8_t my_id, const dfu2_params_t *p) {
             static uint8_t buf[1024];
             uint32_t rem = image_len;
             status = DFU_ST_OK;
+            int stalls = 0;
             while (rem > 0) {
                 int want = rem < sizeof(buf) ? (int)rem : (int)sizeof(buf);
                 int r = recv(s, buf, want, 0);
-                if (r <= 0) { status = DFU_ST_RECV; break; }
+                if (r < 0) {
+                    // SO_RCVTIMEO expiry: tolerate a few before giving up.
+                    if (++stalls > 3) { status = DFU_ST_RECV; break; }
+                    continue;
+                }
+                if (r == 0) { status = DFU_ST_RECV; break; }  // peer closed
+                stalls = 0;
                 ota_add(buf, r);
                 mbedtls_sha256_update_ret(&sh, buf, r);
                 rem -= (uint32_t)r;
@@ -232,7 +258,20 @@ static int run_pull(uint8_t my_id, const dfu2_params_t *p) {
             mbedtls_sha256_free(&sh);
             ota_close();   // flush + re-protect regardless
             if (status == DFU_ST_OK && memcmp(digest, sha, 32) != 0) status = DFU_ST_SHA;
+            // Read back the start of the OTA partition to confirm the write
+            // persisted (should be the RBL header "RBL\0" = 52 42 4c 00 ...).
+            {
+                static char vb[32];
+                flash_read(vb, 32, DFU2_OTA_ADDR);
+                bk_printf("dfu2: readback @0x%x: %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                          DFU2_OTA_ADDR, (unsigned char)vb[0], (unsigned char)vb[1],
+                          (unsigned char)vb[2], (unsigned char)vb[3], (unsigned char)vb[4],
+                          (unsigned char)vb[5], (unsigned char)vb[6], (unsigned char)vb[7]);
+            }
+            bk_printf("dfu2: recv done rem=%u status=%d\r\n", (unsigned)rem, status);
         }
+    } else {
+        bk_printf("dfu2: header recv FAILED\r\n");
     }
 
     uint8_t st = (uint8_t)status;
@@ -247,7 +286,6 @@ typedef struct { uint8_t my_id; dfu2_params_t p; } dfu2_job_t;
 
 static void dfu2_task(void *arg) {
     dfu2_job_t *job = (dfu2_job_t *)arg;
-    g_dfu_active = 1;
     bk_printf("dfu2: entering (id %u, ap '%s')\r\n", job->my_id, job->p.ssid);
 
     bk_wlan_stop_monitor();
@@ -259,9 +297,9 @@ static void dfu2_task(void *arg) {
     } else {
         bk_printf("dfu2: could not join AP\r\n");
     }
-    bk_printf("dfu2: finished status=%d; rebooting\r\n", status);
+    bk_printf("dfu2: finished status=%d; rebooting (poweron for OTA swap)\r\n", status);
     rtos_delay_milliseconds(800);
-    bk_reboot();
+    bk_reboot_with_type(RCSW_RESET_POWERON);
     // (bk_reboot does not return; if it somehow does, drop the flag)
     g_dfu_active = 0;
     os_free(job);
@@ -269,6 +307,11 @@ static void dfu2_task(void *arg) {
 }
 
 void dfu2_start(uint8_t my_id, const dfu2_params_t *params) {
+    // Claim in-progress BEFORE the task exists: the RX callback's guard is
+    // (!g_dfuPending && !dfu2_in_progress()), and if neither holds by the time
+    // we return, a new 0x05 frame could start a second task sharing the static
+    // sector-writer state.
+    g_dfu_active = 1;
     dfu2_job_t *job = os_malloc(sizeof(*job));
     if (!job) { bk_reboot(); return; }
     job->my_id = my_id;
@@ -278,6 +321,7 @@ void dfu2_start(uint8_t my_id, const dfu2_params_t *params) {
                            (beken_thread_function_t)dfu2_task, 8192,
                            (beken_thread_arg_t)job) != kNoErr) {
         os_free(job);
+        g_dfu_active = 0;   // release: retry on the next beacon rebroadcast
         bk_printf("dfu2: failed to start task\r\n");
     }
 }

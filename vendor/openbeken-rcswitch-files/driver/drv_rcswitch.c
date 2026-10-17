@@ -2,7 +2,7 @@
 // (BK7238), running on the OpenBeken base.
 //
 // Listens in 802.11 monitor mode for the RC vendor-IE beacon protocol and acts
-// on 0x06 RelaysUpdate / 0x07 RelaysLedUpdate (see protocol.*), applying the
+// on 0x40 RelaysUpdate / 0x41 RelaysLedUpdate (see protocol.*), applying the
 // dual-default / dual-fallback-timer logic in controller.*. The physical
 // button has no function (per spec).
 //

@@ -31,7 +31,7 @@ index a20f0eb..644dded 100644
 +#if ENABLE_DRIVER_RCSWITCH
 +	//drvdetail:{"name":"RCSwitch",
 +	//drvdetail:"title":"RC broadcast relay switch",
-+	//drvdetail:"descr":"Listens in 802.11 monitor mode for the RC vendor-IE beacon protocol (0x06 RelaysUpdate / 0x07 RelaysLedUpdate) and drives the relay + status LED. For the Tuya T1-2S-NL (BK7238).",
++	//drvdetail:"descr":"Listens in 802.11 monitor mode for the RC vendor-IE beacon protocol (0x40 RelaysUpdate / 0x41 RelaysLedUpdate) and drives the relay + status LED. For the Tuya T1-2S-NL (BK7238).",
 +	//drvdetail:"requires":""}
 +	{ "RCSwitch",                            // Driver Name
 +	RCSwitch_Init,                           // Init

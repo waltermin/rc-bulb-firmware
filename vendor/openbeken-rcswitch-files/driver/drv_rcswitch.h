@@ -2,7 +2,7 @@
 #define DRV_RCSWITCH_H
 
 // RC switch driver: listens in 802.11 monitor mode for the RC broadcast
-// protocol (0x06 RelaysUpdate / 0x07 RelaysLedUpdate) and drives the relay +
+// protocol (0x40 RelaysUpdate / 0x41 RelaysLedUpdate) and drives the relay +
 // status LED. See src/driver/protocol.* and controller.*.
 
 void RCSwitch_Init(void);

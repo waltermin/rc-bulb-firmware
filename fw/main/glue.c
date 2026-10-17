@@ -33,3 +33,13 @@ char *strcpy(char *dst, const char *src) {
     while ((*dst++ = *src++) != '\0') { }
     return r;
 }
+
+// ---- __ctype_ptr__: the SDK's prebuilt lwip/libfunc objects (GCC 4.9, newlib 2.x)
+// reference newlib's old ctype table pointer, which newlib >= 4 (the toolchains
+// nixpkgs ships for macOS/Linux builds) no longer exports. Same semantics as the
+// old libc definition: it points at the start of the 257-entry _ctype_ table.
+#include <newlib.h>
+#include <ctype.h>
+#if defined(__NEWLIB__) && __NEWLIB__ >= 4
+const char *__ctype_ptr__ = (const char *)_ctype_;
+#endif

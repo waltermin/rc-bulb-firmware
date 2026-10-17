@@ -1,0 +1,107 @@
+diff --git a/spec.txt b/spec.txt
+index c38b437..79d8913 100644
+--- a/spec.txt
++++ b/spec.txt
+@@ -120,16 +120,29 @@ re-evaluates every broadcast (so one that missed the first packet, or just
+ rebooted, still acts on a later identical one). Idempotency comes from the
+ build-id comparison, not from a sequence gate.
+ 
+-When an in-range bulb receives a Dfu2Request whose `build_id` differs from its
+-own, it leaves promiscuous mode, joins the Wi-Fi network named by `ssid` /
+-`pass`, connects over TCP to `server_ip`:`server_port`, and pulls the new image
+-into its inactive OTA slot (see the DFU2 transfer protocol below). If the
+-build ids match, the bulb ignores the request (it is already running the target
+-build), which makes a rollout self-terminating.
++`device_type` selects which kind of device the request targets; a device
++ignores requests for any type other than its own. Defined types:
++
++    0x01  KAUF bulb (ESP8266)
++    0x02  Tuya relay switch (BK7238, T1-2S-NL)
++    0x03  panel ESPs
++
++(This field was formerly `fmt_version`, which was always 0x01. Deployed bulbs
++validate the byte as 0x01 and so already implement the new rule — 0x01 now
++means "bulb". Format changes are expressed as new packet tags, not version
++bumps, so the version field was redundant.)
++
++When an in-range device of the matching type receives a Dfu2Request whose
++`build_id` differs from its own, it leaves promiscuous mode, joins the Wi-Fi
++network named by `ssid` / `pass`, connects over TCP to
++`server_ip`:`server_port`, and pulls the new image into its inactive OTA slot
++(see the DFU2 transfer protocol below). If the build ids match, the device
++ignores the request (it is already running the target build), which makes a
++rollout self-terminating.
+ 
+ ```
+ struct Dfu2RequestPacket {
+-    fmt_version: u8,       // packet format version, currently 0x01
++    device_type: u8,       // device type this request targets (see above)
+ 
+     bulb_id_start: u8,     // start of the addressed id range
+     bulb_id_bounds: u8,    // range extends by this many ids (0 => only bulb_id_start)
+@@ -217,3 +230,65 @@ struct PreciseLightUpdate {
+     period_cw: u8,
+ }
+ ```
++
++## Relay device packets (`0x4X`)
++
++Packet tags `0x40`–`0x4F` are reserved for relay devices. Bulbs reject these
++tags as unknown, and relays treat the bulb color tags (`0x01`–`0x03`, `0x06`)
++as no-ops, so the two families never misread each other's frames. New
++device-specific packets must take an unassigned tag; a tag never changes
++meaning once it's assigned.
++
++## `0x40` - RelaysUpdate
++
++Continuously-broadcast desired state for every relay device. Relay devices
++share the device id space with bulbs (ids are unique across device types); the
++bitfield covers the entire space, so bits at ids occupied by bulbs (or by
++nothing) are meaningless and ignored by everyone.
++
++A relay with id N reads bit N and sets its relay to that value. Bit N lives at
++`relay_states[N / 8]`, bit position `N % 8` (LSB-first). The packet is pure
++state — no seq, no epoch. It is idempotent: a relay may apply the same packet
++any number of times, so the base station rebroadcasts it continuously and
++packet loss heals on the next frame.
++
++```
++struct RelaysUpdatePacket {
++    relay_states: [u8; 32],   // bit N = desired relay state of device id N
++}
++```
++
++## `0x41` - RelaysLedUpdate
++
++Identical to RelaysUpdate in every way, but the bits drive the relay device's
++status LED instead of the relay.
++
++```
++struct RelaysLedUpdatePacket {
++    led_states: [u8; 32],     // bit N = desired LED state of device id N
++}
++```
++
++### Relay device behavior
++
++Each relay device has two provisioned DEFAULT values: `default_relay` and
++`default_led` (each on/off). At power-on the device applies both defaults
++before the radio comes up. Thereafter each packet type feeds its own fallback
++timer: if no RelaysUpdate is heard for the fallback window (15 s default) the
++relay reverts to `default_relay`; if no RelaysLedUpdate is heard for the same
++window the LED reverts to `default_led`. The timers are independent — a base
++station that only broadcasts RelaysUpdate gets default LED behavior.
++
++The physical button has no function.
++
++Body size: tag + 32 = 33 bytes, within the 70-byte vendor-IE body limit.
++
++Relay devices honor `0x04` BulbCommand (SetConfig / Reboot) addressed by their
++shared-space id, and `0x05` Dfu2Request with `device_type` 0x02.
++
++SetConfig keys are ONE FLAT SPACE across all device types: a key number has
++one meaning everywhere, and devices ignore keys they don't implement. Shared
++concepts reuse the existing keys — `0x0001` device id, `0x0020` fallback_ms,
++`0x0021` wifi_channel apply to bulbs and relays alike (same types). Relay-
++specific keys live at `0x005X`: `0x0050` default_relay (u8 0/1), `0x0051`
++default_led (u8 0/1). New keys must not repurpose assigned numbers.

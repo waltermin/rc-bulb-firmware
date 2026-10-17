@@ -5,10 +5,10 @@ joins the RC light ecosystem: it listens in monitor mode for the same
 beacon-broadcast protocol as `rc-bulb-firmware` (802.11 beacons carrying a
 single vendor IE, OUI `52 43 68`) and acts on two relay-specific packets:
 
-- **`0x06` RelaysUpdate** — a 32-byte bitfield over the shared device id
+- **`0x40` RelaysUpdate** — a 32-byte bitfield over the shared device id
   space; a relay with id N sets its relay to bit N. Idempotent desired-state
   broadcast, rebroadcast continuously by the base station.
-- **`0x07` RelaysLedUpdate** — same, driving the status LED.
+- **`0x41` RelaysLedUpdate** — same, driving the status LED.
 - **`0x04` BulbCommand** — SetConfig / Reboot honored (shared id space);
   EnterDfuMode ignored (relays only have pull-based DFU2).
 - **`0x05` Dfu2Request** — honored when `device_type` is `0x02` (relay).
@@ -19,7 +19,7 @@ corresponding type is heard for 15 s. The two fallback timers are independent.
 **The physical button has no function.**
 
 See `spec.txt` in rc-bulb-firmware for the protocol document of record
-(0x06/0x07 + the `device_type` field are added by `rc-spec-relays.patch`).
+(0x40/0x41 + the `device_type` field are added by `docs/spec-relay-additions.patch`).
 
 ## Hardware
 

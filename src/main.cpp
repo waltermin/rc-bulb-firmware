@@ -39,8 +39,8 @@ static uint8_t my_id = RELAY_DEFAULT_ID;
 // RX stats for the console
 static volatile uint32_t rx_frames = 0;      // all frames seen in monitor mode
 static volatile uint32_t rx_ours = 0;        // valid protocol frames
-static volatile uint32_t rx_relay_pkts = 0;  // 0x06 seen
-static volatile uint32_t rx_led_pkts = 0;    // 0x07 seen
+static volatile uint32_t rx_relay_pkts = 0;  // 0x40 seen
+static volatile uint32_t rx_led_pkts = 0;    // 0x41 seen
 static volatile bool dump_next = false;      // console 'dump': hexdump next valid frame
 
 // Monitor callback runs in WLAN driver context: parse, poke the controller,

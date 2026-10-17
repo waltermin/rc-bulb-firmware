@@ -1,0 +1,13 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB flash (N16R8 module).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# The host link is the S3's native USB (USB-Serial-JTAG), driven raw by
+# main.c. Keep the console on UART0 (the CH343 port) so ESP logs never
+# land in the bridged byte stream.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# 1 kHz tick so ms-scale timeouts (bridge idle, catch gaps) aren't rounded to 0.
+CONFIG_FREERTOS_HZ=1000
