@@ -40,22 +40,48 @@
 #include "sdk_compat.h"
 
 #include "lwip/sockets.h"
-#include "mbedtls/sha256.h"
-
-// mbedtls 2.x (ESP8266_RTOS_SDK) spelled the error-returning SHA-256 entry points
-// with a _ret suffix; mbedtls 3.x (ESP-IDF v5) made those the plain names.
-// Identical semantics either way.
+// SHA-256 behind one small shim, because every SDK spells it differently:
+//   ESP8266_RTOS_SDK  mbedtls 2.x, error-returning entry points have a _ret suffix
+//   ESP-IDF v6        mbedtls 4.x dropped the legacy hash API; PSA crypto it is
+//                     (psa_crypto_init() already runs at startup in IDF v6)
 #if defined(CONFIG_IDF_TARGET_ESP8266)
-#  define BULB_SHA256(in, len, out)        mbedtls_sha256_ret((in), (len), (out), 0)
-#  define BULB_SHA256_STARTS(ctx)          mbedtls_sha256_starts_ret((ctx), 0)
-#  define BULB_SHA256_UPDATE(ctx, in, len) mbedtls_sha256_update_ret((ctx), (in), (len))
-#  define BULB_SHA256_FINISH(ctx, out)     mbedtls_sha256_finish_ret((ctx), (out))
+#include "mbedtls/sha256.h"
+typedef mbedtls_sha256_context bulb_sha256_t;
+static void bulb_sha256_start(bulb_sha256_t *c) {
+    mbedtls_sha256_init(c);
+    mbedtls_sha256_starts_ret(c, 0);  // 0 => SHA-256, not SHA-224
+}
+static void bulb_sha256_update(bulb_sha256_t *c, const uint8_t *in, size_t len) {
+    mbedtls_sha256_update_ret(c, in, len);
+}
+static void bulb_sha256_finish(bulb_sha256_t *c, uint8_t out[32]) {
+    mbedtls_sha256_finish_ret(c, out);
+    mbedtls_sha256_free(c);
+}
+static void bulb_sha256_abort(bulb_sha256_t *c) { mbedtls_sha256_free(c); }
 #else
-#  define BULB_SHA256(in, len, out)        mbedtls_sha256((in), (len), (out), 0)
-#  define BULB_SHA256_STARTS(ctx)          mbedtls_sha256_starts((ctx), 0)
-#  define BULB_SHA256_UPDATE(ctx, in, len) mbedtls_sha256_update((ctx), (in), (len))
-#  define BULB_SHA256_FINISH(ctx, out)     mbedtls_sha256_finish((ctx), (out))
+#include "psa/crypto.h"
+typedef psa_hash_operation_t bulb_sha256_t;
+static void bulb_sha256_start(bulb_sha256_t *c) {
+    *c = psa_hash_operation_init();
+    psa_hash_setup(c, PSA_ALG_SHA_256);
+}
+static void bulb_sha256_update(bulb_sha256_t *c, const uint8_t *in, size_t len) {
+    psa_hash_update(c, in, len);
+}
+static void bulb_sha256_finish(bulb_sha256_t *c, uint8_t out[32]) {
+    size_t n = 0;
+    if (psa_hash_finish(c, out, 32, &n) != PSA_SUCCESS) memset(out, 0, 32);  // forces a mismatch
+}
+static void bulb_sha256_abort(bulb_sha256_t *c) { psa_hash_abort(c); }
 #endif
+
+static void bulb_sha256(const uint8_t *in, size_t len, uint8_t out[32]) {
+    bulb_sha256_t c;
+    bulb_sha256_start(&c);
+    bulb_sha256_update(&c, in, len);
+    bulb_sha256_finish(&c, out);
+}
 
 #include "config.h"
 #include "pwm_output.h"
@@ -122,7 +148,7 @@ static bool connect_to_ap(uint8_t my_id, const dfu2_params_t *p) {
     strncpy((char *)wc.sta.password, p->pass, sizeof(wc.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wc));
+    ESP_ERROR_CHECK(esp_wifi_set_config(BULB_WIFI_IF_STA, &wc));
     esp_wifi_connect();
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT,
@@ -174,7 +200,7 @@ void dfu2_own_build_id(uint8_t out[PROTO_DFU2_BUILD_ID_LEN]) {
     if (!have) {
         const esp_app_desc_t *d = bulb_app_desc();
         uint8_t digest[32];
-        BULB_SHA256((const unsigned char *)d->version, strlen(d->version), digest);
+        bulb_sha256((const uint8_t *)d->version, strlen(d->version), digest);
         memcpy(cached, digest, PROTO_DFU2_BUILD_ID_LEN);
         have = true;
     }
@@ -220,9 +246,8 @@ static int receive_image(int sock, const esp_partition_t *part,
         return DFU_ST_OTA_BEGIN;
     }
 
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
-    BULB_SHA256_STARTS(&sha);  // SHA-256, not SHA-224
+    bulb_sha256_t sha;
+    bulb_sha256_start(&sha);
 
     static uint8_t buf[1024];
     uint32_t remaining = image_len;
@@ -231,22 +256,21 @@ static int receive_image(int sock, const esp_partition_t *part,
         int r = recv(sock, buf, chunk, 0);
         if (r <= 0) {
             ESP_LOGE(TAG, "recv failed with %u bytes left", (unsigned)remaining);
-            mbedtls_sha256_free(&sha);
+            bulb_sha256_abort(&sha);
             esp_ota_end(handle);
             return DFU_ST_RECV;
         }
         if (esp_ota_write(handle, buf, r) != ESP_OK) {
-            mbedtls_sha256_free(&sha);
+            bulb_sha256_abort(&sha);
             esp_ota_end(handle);
             return DFU_ST_OTA_END;
         }
-        BULB_SHA256_UPDATE(&sha, buf, r);
+        bulb_sha256_update(&sha, buf, (size_t)r);
         remaining -= (uint32_t)r;
     }
 
     uint8_t digest[32];
-    BULB_SHA256_FINISH(&sha, digest);
-    mbedtls_sha256_free(&sha);
+    bulb_sha256_finish(&sha, digest);
 
     if (memcmp(digest, expected_sha, 32) != 0) {
         ESP_LOGE(TAG, "SHA-256 mismatch; discarding image");

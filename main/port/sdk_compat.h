@@ -1,6 +1,6 @@
 // sdk_compat.h -- the small SDK differences that are not worth a whole seam.
 //
-// ESP8266_RTOS_SDK and ESP-IDF v5 diverge in three places this firmware touches:
+// ESP8266_RTOS_SDK and ESP-IDF v6 diverge in a few places this firmware touches:
 // promiscuous RX metadata field names, the network-interface init API, and the
 // presence of a native OTA rollback. Each is a couple of lines, gathered here so
 // the call sites stay readable.
@@ -80,9 +80,19 @@ static inline void bulb_netif_set_hostname(const char *host) {
 #endif
 }
 
+// ---- Wi-Fi interface id ----------------------------------------------------
+
+// esp_wifi_set_config()'s interface argument: ESP_IF_WIFI_STA on the ESP8266 SDK,
+// WIFI_IF_STA in ESP-IDF (the ESP_IF_* aliases are gone in v6).
+#if defined(CONFIG_IDF_TARGET_ESP8266)
+#  define BULB_WIFI_IF_STA ESP_IF_WIFI_STA
+#else
+#  define BULB_WIFI_IF_STA WIFI_IF_STA
+#endif
+
 // ---- app descriptor --------------------------------------------------------
 
-// esp_ota_get_app_description() is deprecated in IDF v5 in favour of
+// esp_ota_get_app_description() is gone in IDF v6 in favour of
 // esp_app_get_description(); the ESP8266 SDK only has the former.
 static inline const esp_app_desc_t *bulb_app_desc(void) {
 #if defined(CONFIG_IDF_TARGET_ESP8266)

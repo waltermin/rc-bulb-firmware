@@ -1,5 +1,5 @@
 # Two targets from one tree: ESP8266_RTOS_SDK for the deployed KAUF bulbs, and
-# ESP-IDF v5 for the ESP32-C3 board. The SDKs use different component-registration
+# ESP-IDF v6 for the ESP32-C3 board. The SDKs use different component-registration
 # APIs, so the branches cannot be merged -- only the taken branch is evaluated.
 
 set(BULB_SRCS
@@ -45,7 +45,7 @@ else()
             esp_wifi
             esp_hw_support
             esp_timer
-            driver
+            esp_driver_gpio
             lwip
             mbedtls
             hal
