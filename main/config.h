@@ -119,10 +119,12 @@
 
 // ---- Lemtone (0x07) ---------------------------------------------------------
 // When 1, the controller logs every Lemtone solve: mode, model evaluations, solve and
-// PWM-publish time in us, and the controller task's free stack. For the on-bulb
-// performance trials; set 0 once the numbers are known.
+// PWM-publish time in us, and the controller task's free stack. Off by default: the
+// ~200-char line per new value costs ~25 ms of console time at 74880 baud. Measured
+// on the bulb (2026-10-16): exact solve ~0.76 ms, worst 36 ms, 2.8 KB stack free.
+// The same numbers are always kept in controller_get_lemtone_stats().
 #ifndef LEMTONE_TIMING_LOG
-#define LEMTONE_TIMING_LOG 1
+#define LEMTONE_TIMING_LOG 0
 #endif
 
 // When 1, a self-test task runs once after boot (selftest.c): the Lemtone reference
