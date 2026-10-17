@@ -1,8 +1,12 @@
-# Two targets from one tree: ESP8266_RTOS_SDK for the deployed KAUF bulbs, and
-# ESP-IDF v6 for the ESP32-C3 board. The SDKs use different component-registration
-# APIs, so the branches cannot be merged -- only the taken branch is evaluated.
+# The firmware, shared by every device. What differs per device comes from
+# devices/<device>/device.cmake; what differs per chip lives in port/<chip>/. The two
+# SDKs use different component-registration APIs, so only the taken branch is
+# evaluated.
 
-set(BULB_SRCS
+set(RC_DEVICE "$ENV{RC_DEVICE}")
+include("${CMAKE_CURRENT_LIST_DIR}/../devices/${RC_DEVICE}/device.cmake")
+
+set(RC_SRCS
     "app_main.c"
     "pwm_output.c"
     "pwm_schedule.c"
@@ -14,11 +18,18 @@ set(BULB_SRCS
     "dfu2.c"
     "selftest.c"
 )
-set(BULB_INCLUDES "." "port" "variants")
+# Everything chip-specific: the PWM timer backend (port/pwm_timer.h is the seam).
+file(GLOB RC_PORT_SRCS RELATIVE "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/port/${DEVICE_TARGET}/*.c")
+list(APPEND RC_SRCS ${RC_PORT_SRCS})
+set(RC_INCLUDES "." "port" "port/${DEVICE_TARGET}" "variants")
+set(RC_LEMTONE "")
+if(DEVICE_LEMTONE)
+    set(RC_LEMTONE lemtone)
+endif()
 
-if(IDF_TARGET STREQUAL "esp8266")
-    set(COMPONENT_SRCS ${BULB_SRCS} "port/pwm_timer_wdev.c")
-    set(COMPONENT_ADD_INCLUDEDIRS ${BULB_INCLUDES})
+if(DEVICE_TARGET STREQUAL "esp8266")
+    set(COMPONENT_SRCS ${RC_SRCS})
+    set(COMPONENT_ADD_INCLUDEDIRS ${RC_INCLUDES})
     set(COMPONENT_REQUIRES
         esp8266
         nvs_flash
@@ -29,13 +40,13 @@ if(IDF_TARGET STREQUAL "esp8266")
         lwip
         mbedtls
         pthread   # pthread_cond_* pulled in by libstdc++ static-init guards
-        lemtone   # ../lemtone: the Lemtone solver (EXTRA_COMPONENT_DIRS in the top-level CMakeLists)
+        ${RC_LEMTONE}
     )
     register_component()
 else()
     idf_component_register(
-        SRCS ${BULB_SRCS} "port/pwm_timer_systimer.c"
-        INCLUDE_DIRS ${BULB_INCLUDES}
+        SRCS ${RC_SRCS}
+        INCLUDE_DIRS ${RC_INCLUDES}
         REQUIRES
             nvs_flash
             app_update
@@ -50,14 +61,25 @@ else()
             mbedtls
             hal
             soc
-            lemtone
+            ${RC_LEMTONE}
     )
 endif()
+
+# The device's identity, for the C side (config.h documents each).
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    "RC_DEVICE_NAME=\"${RC_DEVICE}\""
+    "PROTO_DEVICE_TYPE=${DEVICE_TYPE}"
+    "LIGHT_VARIANT_${DEVICE_VARIANT}=1"
+    "LEMTONE_ENABLED=${DEVICE_LEMTONE}"
+)
 
 # On-device self-test build: BULB_SELFTEST=1 in the environment (build.ps1 reconfigures
 # every run). It also needs the Lemtone reference vectors from the host tests.
 if("$ENV{BULB_SELFTEST}" STREQUAL "1")
+    if(NOT DEVICE_LEMTONE)
+        message(FATAL_ERROR "BULB_SELFTEST needs a device with the Lemtone solver (bulb)")
+    endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE LEMTONE_SELFTEST=1)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../lemtone/test")
-    message(STATUS "bulb-firmware: LEMTONE_SELFTEST build")
+    message(STATUS "rc firmware: LEMTONE_SELFTEST build")
 endif()

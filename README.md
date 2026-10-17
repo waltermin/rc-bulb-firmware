@@ -1,8 +1,15 @@
 # bulb-firmware
 
-A minimal, ground-up firmware for the KAUF RGBWW (ESP8266) bulb, built directly
-on **ESP8266_RTOS_SDK**. It replaces the stock ESPHome stack with a small,
-purpose-built control path:
+A minimal, ground-up firmware for the RC lights, built from one tree for every
+device:
+
+| device | hardware | SDK | DFU2 `device_type` |
+|---|---|---|---|
+| `bulb`  | KAUF RGBWW bulb, ESP8266 (5 direct LED strings) | ESP8266_RTOS_SDK | `0x01` |
+| `panel` | panel light, ESP32-C3 (RGB direct + tunable-white driver IC) | ESP-IDF v6 | `0x03` |
+
+(`0x02` is the relay switch, a separate firmware.) It replaces the stock ESPHome
+stack with a small, purpose-built control path:
 
 - **Instant default color** — the LEDs are driven to a configurable RGBWW value
   as the first action in `app_main`, before any radio is powered.
@@ -22,6 +29,8 @@ purpose-built control path:
 
 ## Hardware
 
+Pin tables live in `main/variants/` (one header per board). The bulb:
+
 | Channel | GPIO |
 |---------|------|
 | Red     | 4    |
@@ -36,7 +45,9 @@ which is why it is glitch-free. Each channel gets its own duty, phase, and PWM
 rate: the schedule is counted in 1 µs ticks (one tick == one TSF microsecond, so
 periods are powers of two — `2^n µs`, `1000000/2^n` Hz — and all channels are
 harmonics that stack into one repeatable edge table walked by an IRAM-resident ISR
-paced against the free-running TSF counter). Capped at 80 % duty, gamma 2.8; the
+paced against the free-running TSF counter). On the panel the same engine runs on
+the C3's systimer at interrupt priority 4 (`main/port/esp32c3/`), and `pwm_mix.c`
+turns the protocol's CW/WW into the driver IC's CCT/DIM inputs. Capped at 80 % duty, gamma 2.8; the
 default rate is ~977 Hz (`2^10` µs) — all configurable in `main/config.h`. (A brief
 static color shows at boot; real modulation begins once the radio — hence the TSF
 timer — is up, via `pwm_output_start_after_radio()`.)
@@ -44,58 +55,64 @@ timer — is up, via `pwm_output_start_after_radio()`.)
 ## Layout
 
 ```
-main/
-  config.h        all tunables (#defines)
+CMakeLists.txt    one project; -DDEVICE=<name> picks devices/<name>/
+build.ps1 / build.sh   build one device into build-<device>/ (sdkconfig.<device>)
+devices/
+  bulb/   device.cmake (target, project name, DFU2 device type, variant, Lemtone)
+          sdkconfig.defaults, partitions.csv
+  panel/  same, for the ESP32-C3 panel
+main/             shared by every device
+  config.h        tunables (#defines)
   app_main.c      startup ordering + wiring
-  pwm_output.*    5-channel PWM engine (curve + max_power; WDEV/TSF0 ISR + GPIO)
+  pwm_output.*    PWM engine (curve + max_power, edge ISR, GPIO)
   pwm_schedule.*  pure per-channel duty/phase/period -> edge-table compiler
-  id_store.*      bulb id from NVS
+  pwm_mix.*       logical R G B WW CW -> the board's physical channels
+  bulb_config.*   NVS-backed config store (id, defaults, ...)
   sniffer.*       promiscuous RX -> parser -> controller (+ build-id gate for DFU2)
   protocol.*      pure, host-testable frame/packet parser
   controller.*    applies colors, fallback timer, DFU2 trigger
   dfu2.*          STA connect + TCP OTA CLIENT (pull) + rollback guard
-partitions.csv    4 MB two-OTA table
-test/             host unit tests for protocol.c
-tools/            send_update.py, provision_id.py, dfu2_server.py,
+  selftest.*      on-device Lemtone self-test (BULB_SELFTEST=1 builds only)
+  variants/       board pin tables, selected by the device
+  port/           chip seams: pwm_timer.h (timer backend), sdk_compat.h
+    esp8266/      Wi-Fi WDEV/TSF0 timer backend (NMI)
+    esp32c3/      systimer backend (priority-4 interrupt)
+lemtone/          Lemtone solver (linked only for devices with DEVICE_LEMTONE)
+test/             host unit tests (protocol, PWM schedule)
+tools/            dfu2_server.py, provision_id.py, monitor/tail, self-test watcher,
                   dfu1_* (legacy push-DFU tools for old bulbs)
 ```
 
 ## Build & flash
 
-Requires ESP8266_RTOS_SDK, the xtensa-lx106 toolchain, CMake, Ninja, and Python
-(with the SDK's `requirements.txt` installed, incl. `setuptools` for
-`pkg_resources`).
+One command per device; each builds into its own `build-<device>/`:
 
-The simplest path is the checked-in script, which drives CMake+Ninja directly
-and applies the workarounds documented below:
-
-```sh
-./build.sh          # -> build/bulb-firmware.bin (+ bootloader, partition table)
+```powershell
+.\build.ps1 -Device bulb    # -> build-bulb/bulb-firmware.bin   (ESP8266_RTOS_SDK)
+.\build.ps1 -Device panel   # -> build-panel/panel-firmware.bin (ESP-IDF v6)
 ```
 
-Or manually:
+(`./build.sh bulb` / `./build.sh panel` on Linux/macOS; for the panel, export
+ESP-IDF v6 first.) Under the hood it is one CMake project:
+`-DDEVICE=<name>` selects `devices/<name>/`, whose `device.cmake` sets the SDK
+target, project name, DFU2 device type, board variant and whether Lemtone is
+linked; `sdkconfig.<device>` is seeded from that device's `sdkconfig.defaults`.
+
+**Bulb** — needs ESP8266_RTOS_SDK (`$ESP8266_SDK_PATH`, else `../ESP8266_RTOS_SDK`),
+the xtensa-lx106 toolchain, CMake, Ninja, and Python (with the SDK's
+`requirements.txt`, incl. `setuptools` for `pkg_resources`). A clean build is
+~475 KB, about 50 % of the 960 KB OTA slot. Flash the images over serial the
+first time (offsets from `devices/bulb/partitions.csv`):
 
 ```sh
-export IDF_PATH=/path/to/ESP8266_RTOS_SDK
-export PATH="$PWD/.stubbin:$PATH"          # stub mconf-idf (see note 1)
-mkdir build && cd build
-cmake -G Ninja -DIDF_TARGET=esp8266 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..   # note 2
-ninja
+esptool.py --chip esp8266 -p <PORT> write_flash --flash_mode dout --flash_size 4MB \
+  0x0     build-bulb/bootloader/bootloader.bin \
+  0x8000  build-bulb/partition_table/partition-table.bin \
+  0xd000  build-bulb/ota_data_initial.bin \
+  0x10000 build-bulb/bulb-firmware.bin
 ```
 
-A verified clean build produces a **~457 KB** app — about 48 % of the 960 KB OTA
-slot.
-
-Flash the three images over serial the first time (offsets from `partitions.csv`):
-
-```sh
-esptool.py --chip esp8266 -p <PORT> write_flash \
-  0x0     build/bootloader/bootloader.bin \
-  0x8000  build/partition_table/partition-table.bin \
-  0x10000 build/bulb-firmware.bin
-```
-
-**Build-environment notes (Windows / CMake 4.x):**
+Build-environment notes (Windows / CMake 4.x):
 1. The SDK's kconfig init insists on an `mconf-idf` executable on `PATH` (or a
    native host gcc). `menuconfig` is not used by a normal build — a plain build
    generates config via `confgen.py` — so `.stubbin/mconf-idf.exe` (a trivial
@@ -103,8 +120,12 @@ esptool.py --chip esp8266 -p <PORT> write_flash \
 2. `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` lets CMake 4.x configure the SDK's older
    submodules (mbedtls etc.) whose `cmake_minimum_required` predates 3.5.
 
-If you have a full ESP-IDF-style tools install, `idf.py set-target esp8266 &&
-idf.py build && idf.py -p <PORT> flash monitor` also works.
+**Panel** — needs ESP-IDF v6 with the riscv32 toolchain. `build.ps1` activates it
+from `$env:RC_IDF_ACTIVATE`, else the ESP-IDF Installation Manager profile
+(`C:\Espressif\tools\Microsoft.v6*.PowerShell_profile.ps1`), else
+`C:\esp\v6*\esp-idf\export.ps1`. A clean build is ~835 KB, 44 % of its 1.9 MB
+slot. Flash with `idf.py -B build-panel -p <PORT> flash` (after activating IDF), or
+esptool with `build-panel/flash_args`.
 
 Provision each bulb's id (one identical app image works for all bulbs):
 
@@ -118,7 +139,7 @@ needed.
 
 ## DFU2 / OTA (pull-based)
 
-Each build carries a unique **build id**: `build.sh` writes a random token to
+Each build carries a unique **build id**: `build.ps1` / `build.sh` write a random token to
 `version.txt`, the SDK stamps it into the app descriptor (`esp_app_desc.version`),
 and both the bulb and the update server derive the 8-byte wire id as
 `sha256(version)[:8]`. (The ESP8266 toolchain does not populate `app_elf_sha256`,
@@ -129,7 +150,7 @@ Rollout flow (ESP8266_RTOS_SDK has **no** native app-rollback API):
 1. Start the update server with the image; it prints the build id and a
    ready-to-paste base-station command:
    ```sh
-   python3 tools/dfu2_server.py build/bulb-firmware.bin --range 1-100 \
+   python3 tools/dfu2_server.py build-bulb/bulb-firmware.bin --range 1-100 \
        --ssid "RC-Update" --pass "swordfish"
    #  -> dfu2 1 100 RC-Update swordfish 192.168.4.2 3333 <build_id_hex>
    ```

@@ -1,16 +1,19 @@
-# ESP32-C3 overrides, applied on top of sdkconfig.defaults.
-# IDF reads sdkconfig.defaults then sdkconfig.defaults.<target>, so these win.
+# sdkconfig defaults for the panel (ESP32-C3, ESP-IDF v6). The build seeds
+# sdkconfig.panel from this file (see the top-level CMakeLists).
 
 CONFIG_IDF_TARGET="esp32c3"
 
-# The DOUT choice in the base file exists only for the ESPHome->RTOS in-place
-# bootloader migration on the ESP8266; none of that applies here.
+# Flash: 4 MB, DIO. (The bulb's DOUT exists only for its ESPHome->RTOS in-place
+# bootloader migration; none of that applies here.)
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_c3.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions_c3.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="devices/panel/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="devices/panel/partitions.csv"
+
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # Console on UART0 (GPIO20/21). The C3's USB-serial-JTAG is not wired on this
 # board -- the S3 bridge talks to UART0.

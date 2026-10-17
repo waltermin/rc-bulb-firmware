@@ -1,4 +1,4 @@
-# 4 MB two-OTA table for the ESP32-C3 board.
+# 4 MB two-OTA table for the panel (ESP32-C3).
 #
 # The C3 has a flash MMU that maps arbitrarily, so the ESP8266 rule that an app
 # partition must sit inside a single 1 MB XIP-mappable block does not apply --

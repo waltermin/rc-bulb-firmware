@@ -24,7 +24,7 @@ import time
 import serial
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "half"
-IMG = sys.argv[2] if len(sys.argv) > 2 else "build/bulb-firmware.bin"
+IMG = sys.argv[2] if len(sys.argv) > 2 else "build-bulb/bulb-firmware.bin"
 LOG = "dfu-test.log"
 MAGIC = 0x686C4352
 PORT = 3333

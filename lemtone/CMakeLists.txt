@@ -1,6 +1,7 @@
-# ESP8266_RTOS_SDK component for the Lemtone solver (found via EXTRA_COMPONENT_DIRS in
-# the top-level CMakeLists). Only the solver and its compiled-in model go into the
-# firmware; test/ and web/ are host and wasm builds driven by build.py.
+# ESP8266_RTOS_SDK / ESP-IDF component for the Lemtone solver, pulled in by the
+# top-level CMakeLists only for devices with DEVICE_LEMTONE. Only the solver and its
+# compiled-in model go into the firmware; test/ and web/ are host and wasm builds
+# driven by build.py.
 if(IDF_TARGET STREQUAL "esp8266")
     set(COMPONENT_SRCS "lemtone.c" "lemtone_model_default.c")
     set(COMPONENT_ADD_INCLUDEDIRS ".")

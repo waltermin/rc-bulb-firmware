@@ -36,25 +36,19 @@
 // Fixed 802.11 channel the base station broadcasts on and we sniff on.
 #define WIFI_CHANNEL 11
 
-// ---- PWM (match original Kauf bulb behavior) --------------------------------
-// GPIO assignments come from the stock kauf-bulb.yaml.
-#define PWM_GPIO_RED 4
-#define PWM_GPIO_GREEN 12
-#define PWM_GPIO_BLUE 14
-#define PWM_GPIO_CW 5
-#define PWM_GPIO_WW 13
-
-// ---- TEST BOARD OPTION ------------------------------------------------------
-// On the bench devboard, GPIO12 (green) and GPIO14 (blue) are wired to an I2C
-// device, so those two channels must NOT be driven. With this set to 1 the PWM
-// module simply omits the green + blue channels; their pins are left untouched
-// (high-Z inputs after reset, safe for the I2C bus). Set to 0 for real bulbs.
-#ifndef OMIT_I2C_PINS
-#define OMIT_I2C_PINS 0
+// ---- device identity ----------------------------------------------------------
+// Set per device by main/CMakeLists from devices/<device>/device.cmake; the defaults
+// here only serve host builds of the pure modules.
+//   RC_DEVICE_NAME     "bulb", "panel", ...
+//   PROTO_DEVICE_TYPE  0x05 Dfu2Request device_type this image answers (protocol.h)
+//   LIGHT_VARIANT_*    board pin table (variants/variant.h); GPIOs live there
+//   LEMTONE_ENABLED    1 = Lemtone solver linked, 0x07 LemtoneUpdate acted on
+#ifndef RC_DEVICE_NAME
+#define RC_DEVICE_NAME "bulb"
 #endif
-
-// The active channel set is derived from OMIT_I2C_PINS in pwm_output.c (channel
-// indices are generated there, not hard-coded here).
+#ifndef LEMTONE_ENABLED
+#define LEMTONE_ENABLED 0
+#endif
 
 // ---- PWM engine timing model (custom WDEV/TSF0-driven software PWM) ---------
 // One tick = 1 us, the resolution of the free-running Wi-Fi TSF0 counter the ISR
@@ -135,7 +129,7 @@
 // vectors and timing on this chip, then 0x07 frames injected through the real RX ->
 // controller path with a visible colour sequence, all reported on the console. The bulb
 // works normally afterwards. Set by the build (BULB_SELFTEST=1 in the environment of
-// build.ps1); keep 0 for shipped images.
+// build.ps1 / build.sh); keep 0 for shipped images.
 #ifndef LEMTONE_SELFTEST
 #define LEMTONE_SELFTEST 0
 #endif

@@ -7,7 +7,7 @@ and tees it to a logfile, and exits when the self-test prints its final verdict:
 
     python tools/selftest_watch.py <PORT> [--log selftest.log] [--timeout 300]
 
-Build the image with:  BULB_SELFTEST=1 ./build.ps1  (or $env:BULB_SELFTEST=1 in PowerShell)
+Build the image with:  BULB_SELFTEST=1 ./build.sh bulb  (or $env:BULB_SELFTEST=1; .\build.ps1 -Device bulb)
 """
 import argparse
 import sys

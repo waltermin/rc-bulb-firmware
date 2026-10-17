@@ -144,6 +144,9 @@ static void handle_frame(const uint8_t *payload, uint32_t len) {
     // the decoded value to the controller, remembering it only once it is queued so a
     // dropped post is retried by the next broadcast.
     if (r.has_lemtone) {
+#if !LEMTONE_ENABLED
+        return;  // no Lemtone model for this device: ignore 0x07 entirely
+#endif
         if (s_lt_have && r.lemtone_word == s_lt_word) {
             s_lt_stats.repeats++;
             controller_notify_keepalive();

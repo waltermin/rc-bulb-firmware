@@ -9,7 +9,7 @@ joins the configured AP, takes a DHCP lease with hostname rc_light_dfu_<id>, and
 listens on port 3333. Find its IP from your AP/DHCP server's lease table (look for
 that hostname), then:
 
-    python3 dfu1_push.py 192.168.4.23 ../build/bulb-firmware.bin
+    python3 dfu1_push.py 192.168.4.23 ../build-bulb/bulb-firmware.bin
 
 Wire header (little-endian):  magic u32 | version u8 | image_len u32 | sha256[32]
 """

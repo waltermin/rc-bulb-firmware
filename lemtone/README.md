@@ -1,15 +1,16 @@
 # lemtone — Lemtone value → PWM duty + period
 
 Pure C module (no SDK, no libc) that turns a Lemtone value into per-channel on-time
-ticks and PWM periods for the RGBWW bulb. The firmware builds it as a component
-(`EXTRA_COMPONENT_DIRS` in the top-level CMakeLists): `main/controller.c` solves every
-`0x07 LemtoneUpdate` entry addressed to the bulb.
+ticks and PWM periods for the RGBWW bulb. The firmware links it as a component for
+devices with `DEVICE_LEMTONE 1` in `devices/<device>/device.cmake` (the bulb; the panel
+has no model yet): `main/controller.c` solves every `0x07 LemtoneUpdate` entry addressed
+to the bulb.
 
 | file | what |
 |---|---|
 | `lemtone.h/.c` | solver, period selection, quantisation, OKLab conversions |
 | `lemtone_model_default.c`, `lemtone_model.json` | calibration tables — **generated** by `calibration/export_lemtone_model.py` |
-| `CMakeLists.txt`, `component.mk` | firmware component (only `lemtone.c` + the model; built at -O2) |
+| `CMakeLists.txt` | firmware component (only `lemtone.c` + the model; built at -O2) |
 | `test/test_lemtone.c`, `test/lemtone_vectors.h` | host tests; vectors **generated** by `calibration/lemtone_ref.py` (float64 reference of the same algorithm) |
 | `web/lemtone_tool.template.html`, `web/lemtone_wasm.c` | validation page source; `web/lemtone_tool.html` is **generated** (wasm, CRI code/tables and model spectra inlined) |
 | `web/cri.js`, `web/cri_tables.json`, `test/cri_cases.json` | CIE 13.3 CRI for the page; tables and reference cases **generated** from colour-science by `web/gen_cri_tables.py`, checked by `web/check_cri.mjs` |

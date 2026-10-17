@@ -7,7 +7,7 @@ this only to update legacy bulbs.
 Watch DHCP for rc_light_dfu_<id> bulbs joining the AP and push a firmware image to
 each one the moment it appears.
 
-    python3 tools/dfu1_fleet.py 1-25 build/bulb-firmware.bin -i Wi-Fi
+    python3 tools/dfu1_fleet.py 1-25 build-bulb/bulb-firmware.bin -i Wi-Fi
 
 How it works
   * tshark sniffs DHCP on the given interface. A bulb's DHCP Request is a

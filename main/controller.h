@@ -37,7 +37,8 @@ bool controller_notify_raw_entry(float r, float g, float b, float ww, float cw,
 // wire: OKLab chromaticity a, b at L = 1, lumens (0 = off), fidelity 0..1. The
 // controller task runs the Lemtone solver and drives the PWM from its duties and
 // periods. Resets the fallback timer. Safe from the RX callback; non-blocking.
-// Returns false if the queue was full and the value was dropped.
+// Returns false if the queue was full and the value was dropped. Only acted on by
+// devices with LEMTONE_ENABLED (the sniffer does not post it otherwise).
 bool controller_notify_lemtone(float a, float b, float lm, float fidelity);
 
 // Post a keep-alive: the light we are showing was just re-sent unchanged (the RX path

@@ -17,7 +17,9 @@
 #include "dfu2.h"
 #include "esp_system.h"  // esp_restart
 #include "esp_timer.h"   // esp_timer_get_time (Lemtone timing log)
+#if LEMTONE_ENABLED
 #include "lemtone.h"
+#endif
 
 static const char *TAG = "controller";
 
@@ -55,13 +57,15 @@ typedef struct {
 
 static QueueHandle_t s_queue;
 
-// Lemtone solver context: built once from the compiled-in model, read-only after.
-static lemtone_ctx_t s_lemtone;
 static controller_lemtone_stats_t s_lt_stats = {.min_stack_free = UINT32_MAX};
 
 void controller_get_lemtone_stats(controller_lemtone_stats_t *out) {
     *out = s_lt_stats;
 }
+
+#if LEMTONE_ENABLED
+// Lemtone solver context: built once from the compiled-in model, read-only after.
+static lemtone_ctx_t s_lemtone;
 
 // Solve a Lemtone value and drive the PWM with the result. The solver output is
 // already capped at the model's duty_max and quantized to whole ticks per period, so
@@ -97,6 +101,7 @@ static void apply_lemtone(float a, float b, float lm, float f) {
              pwm.period_log2[4], (unsigned)uxTaskGetStackHighWaterMark(NULL));
 #endif
 }
+#endif  // LEMTONE_ENABLED
 
 // True if a SetConfig wire tag names one of the default/fallback color channels.
 // A write to any of these changes the color the bulb shows while idle, so it is
@@ -159,9 +164,11 @@ static void controller_task(void *arg) {
                     sniffer_apply_channel(bulb_config_get_u8(CFG_WIFI_CHANNEL));
                 }
             } else if (msg.type == MSG_APPLY_LEMTONE) {
+#if LEMTONE_ENABLED
                 apply_lemtone(msg.u.lemtone.a, msg.u.lemtone.b, msg.u.lemtone.lm, msg.u.lemtone.f);
                 last_seen = xTaskGetTickCount();
                 at_default = false;
+#endif
             } else if (msg.type == MSG_KEEPALIVE) {
                 // An unchanged repeat of what we show: only the fallback timer moves.
                 // Once at the default, the sniffer has been told to re-apply its next
@@ -209,8 +216,10 @@ static void controller_task(void *arg) {
 }
 
 void controller_start(void) {
+#if LEMTONE_ENABLED
     lemtone_init(&s_lemtone, &LEMTONE_MODEL_DEFAULT);
     ESP_LOGI(TAG, "lemtone model %s", s_lemtone.m->id);
+#endif
     s_queue = xQueueCreate(8, sizeof(ctrl_msg_t));
     configASSERT(s_queue != NULL);
     xTaskCreate(controller_task, "controller", 4096, NULL, 5, NULL);

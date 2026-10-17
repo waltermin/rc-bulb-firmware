@@ -5,8 +5,8 @@
 // compiler are variant-agnostic; only this table and the mixer know the topology.
 //
 // Two shipped today:
-//   kauf_rgbww   ESP8266 bulb -- five direct LED strings (R G B CW WW)
-//   c3_rgb_cct   ESP32-C3 board -- R G B direct, plus a tunable-white driver IC
+//   kauf_rgbww   bulb (ESP8266) -- five direct LED strings (R G B CW WW)
+//   c3_rgb_cct   panel (ESP32-C3) -- R G B direct, plus a tunable-white driver IC
 //                fed by a colour-temperature input and a brightness input
 //
 // The control protocol never changes: the wire, the controller and the duty curve
@@ -54,21 +54,14 @@ typedef struct {
     bool     rate_locked;  // ignore per-channel rate changes from 0x06 packets
 } pwm_channel_t;
 
-// Variant selection defaults from the target but can be forced with -D.
-#if !defined(LIGHT_VARIANT_KAUF_RGBWW) && !defined(LIGHT_VARIANT_C3_RGB_CCT)
-#  if defined(CONFIG_IDF_TARGET_ESP8266)
-#    define LIGHT_VARIANT_KAUF_RGBWW 1
-#  elif defined(CONFIG_IDF_TARGET_ESP32C3)
-#    define LIGHT_VARIANT_C3_RGB_CCT 1
-#  else
-#    error "no light variant for this target"
-#  endif
-#endif
-
+// The variant is a property of the device, not the chip: devices/<device>/device.cmake
+// sets DEVICE_VARIANT, which main/CMakeLists turns into LIGHT_VARIANT_<name>=1.
 #if defined(LIGHT_VARIANT_KAUF_RGBWW)
 #  include "variant_kauf_rgbww.h"
 #elif defined(LIGHT_VARIANT_C3_RGB_CCT)
 #  include "variant_c3_rgb_cct.h"
+#else
+#  error "no light variant: set DEVICE_VARIANT in devices/<device>/device.cmake"
 #endif
 
 #endif  // BULB_VARIANT_H
