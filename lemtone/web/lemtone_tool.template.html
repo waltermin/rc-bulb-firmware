@@ -566,15 +566,16 @@ function update(fromInputs) {
 
 // ---------------------------------------------------------------- colour rendering
 const CRI = makeCri(CRI_TABLES);
-// Predicted output spectrum: sum_i light_duty_i * g_i * spectrum_i(light_duty_i), knots
-// interpolated exactly as the C model interpolates its XYZ tables.
+// Predicted output spectrum: sum_i light_duty_i * g_i * spectrum_i(knot duty), knots
+// interpolated exactly as the C model interpolates its XYZ tables (knot duty: the channel's
+// own, or the white pair's DIM on driver-white models).
 function outputSpd() {
   const n = MODEL_SPD.wl.length, out = new Array(n).fill(0);
   for (let i = 0; i < 5; i++) {
     const d = W.lt_eff_duty(i); if (!(d > 0)) continue;
-    const k = MODEL_SPD.knots[i], S = MODEL_SPD.spd[i], g = W.lt_out_sag(i);
-    let j = 1; while (j < k.length - 1 && d > k[j]) j++;
-    const t = Math.min(1, Math.max(0, (d - k[j - 1]) / (k[j] - k[j - 1])));
+    const k = MODEL_SPD.knots[i], S = MODEL_SPD.spd[i], g = W.lt_out_sag(i), kd = W.lt_knot_duty(i);
+    let j = 1; while (j < k.length - 1 && kd > k[j]) j++;
+    const t = Math.min(1, Math.max(0, (kd - k[j - 1]) / (k[j] - k[j - 1])));
     for (let w = 0; w < n; w++) out[w] += d * g * (S[j - 1][w] + t * (S[j][w] - S[j - 1][w]));
   }
   return out;

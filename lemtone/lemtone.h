@@ -35,8 +35,15 @@ extern "C" {
 #endif
 
 #define LEMTONE_CH        5
-#define LEMTONE_MAX_KNOTS 8
+// Knots per channel the model struct holds. The panel's whites need 24 (every measured DIM
+// level); a device may set less (devices/<device>/device.cmake DEVICE_LEMTONE_MAX_KNOTS) to
+// keep the model small: the bulb uses 8.
+#ifndef LEMTONE_MAX_KNOTS
+#define LEMTONE_MAX_KNOTS 24
+#endif
 #define LEMTONE_NFEAT     18
+#define LEMTONE_PULSE_N0  10   // pulse_n[][k] is for period 2^(LEMTONE_PULSE_N0 + k) us
+#define LEMTONE_PULSE_NN  5    // ... k = 0..4: n = 10..14, the solver's period range
 
 enum { LEMTONE_R = 0, LEMTONE_G, LEMTONE_B, LEMTONE_WW, LEMTONE_CW };
 
@@ -52,8 +59,25 @@ typedef struct {
     float       xyz[LEMTONE_CH][LEMTONE_MAX_KNOTS][3];    // XYZ per unit effective duty
     float       theta[LEMTONE_CH][LEMTONE_NFEAT];
     float       pulse_us[LEMTONE_CH];  // light per pulse beyond its tick count, in us
+    // 1: pulse_n replaces pulse_us, per period (the panel's RGB loses more light per pulse
+    // at long periods). 0 (the bulb): pulse_us at every period.
+    uint8_t     pulse_by_period;
+    float       pulse_n[LEMTONE_CH][LEMTONE_PULSE_NN];
     float       duty_max;              // effective-duty cap (PWM_MAX_POWER)
     float       lm_per_y;              // lumens per unit of model Y
+    // Whites behind a tunable-white driver (the panel): one DIM input carries ww + cw and
+    // one CCT input the warm fraction ww / (ww + cw), as main/pwm_mix.c sends them. Both 0
+    // (the bulb) means two independent strings, each capped at duty_max.
+    float       white_sum_max;         // > 0: ww + cw <= white_sum_max
+    uint8_t     white_grid_log2;       // > 0: the pair is quantized as (DIM, CCT), each in steps
+                                       // of 2^-n: the driver inputs' PWM resolution (the panel:
+                                       // 12, hardware PWM; must match the firmware variant)
+    uint16_t    white_dim_min;         // with white_grid_log2: DIM is 0 or at least this many
+                                       // steps (the panel's driver was erratic below 3/256)
+    // 1 (the panel): the whites' per-unit colour T_ww / T_cw is looked up at the driver's DIM
+    // (ww + cw), not at each white's own duty: the driver sets one current for the pair, so
+    // its efficiency follows the total. Their knots are DIM values.
+    uint8_t     white_by_dim;
 } lemtone_model_t;
 
 extern const lemtone_model_t LEMTONE_MODEL_DEFAULT;
@@ -99,6 +123,11 @@ typedef struct {
 // n 10..14; 200 ticks; > 180 lm -> 2^10, > 60 lm -> 2^12, else 2^14.
 extern const lemtone_period_cfg_t LEMTONE_PERIOD_DEFAULT;
 
+// With white_grid_log2 the white entries describe the driver inputs instead: ticks[LEMTONE_CW]
+// = DIM steps, ticks[LEMTONE_WW] = CCT steps (warm fraction), both of 2^-white_grid_log2;
+// period_log2 holds white_grid_log2 for both (the inputs run at a fixed carrier the firmware
+// owns, so it only names the grid); cmd_duty[] is the logical ww / cw pair that the mixer turns
+// back into exactly those steps.
 typedef struct {
     uint8_t  period_log2[LEMTONE_CH];
     uint16_t ticks[LEMTONE_CH];     // on-time per period, in 1 us ticks
@@ -107,6 +136,9 @@ typedef struct {
 } lemtone_pwm_t;
 
 void lemtone_init(lemtone_ctx_t *ctx, const lemtone_model_t *m);
+
+// Light per pulse beyond its tick count (us) of channel i at period 2^n us.
+float lemtone_pulse_us(const lemtone_model_t *m, int i, uint8_t n);
 
 // Model output for effective duties d.
 void lemtone_forward(const lemtone_ctx_t *ctx, const float d[LEMTONE_CH], float xyz[3]);

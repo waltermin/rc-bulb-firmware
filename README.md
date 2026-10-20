@@ -46,8 +46,10 @@ rate: the schedule is counted in 1 µs ticks (one tick == one TSF microsecond, s
 periods are powers of two — `2^n µs`, `1000000/2^n` Hz — and all channels are
 harmonics that stack into one repeatable edge table walked by an IRAM-resident ISR
 paced against the free-running TSF counter). On the panel the same engine runs on
-the C3's systimer at interrupt priority 4 (`main/port/esp32c3/`), and `pwm_mix.c`
-turns the protocol's CW/WW into the driver IC's CCT/DIM inputs. Capped at 80 % duty, gamma 2.8; the
+the C3's systimer at interrupt priority 4 (`main/port/esp32c3/`) for R/G/B, and `pwm_mix.c`
+turns the protocol's CW/WW into the driver IC's CCT/DIM inputs, which run on the C3's LEDC
+hardware PWM (`port/pwm_hw.h`, `port/esp32c3/pwm_hw_ledc.c`): a fixed 3906.25 Hz carrier at
+12-bit duty. Capped at 80 % duty, gamma 2.8; the
 default rate is ~977 Hz (`2^10` µs) — all configurable in `main/config.h`. (A brief
 static color shows at boot; real modulation begins once the radio — hence the TSF
 timer — is up, via `pwm_output_start_after_radio()`.)

@@ -52,6 +52,8 @@ typedef struct {
     uint8_t  period_log2;  // n; PWM period = 2^n us
     float    base_phase;   // degrees, (-180, 180]
     bool     rate_locked;  // ignore per-channel rate changes from 0x06 packets
+    bool     hw_pwm;       // driven by the chip's PWM peripheral (port/pwm_hw.h) instead of
+                           // the software edge engine; needs VARIANT_HW_PWM in the variant
 } pwm_channel_t;
 
 // The variant is a property of the device, not the chip: devices/<device>/device.cmake

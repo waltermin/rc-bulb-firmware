@@ -7,8 +7,11 @@
 #   DEVICE_TYPE     0x05 Dfu2Request device_type this image answers (spec.txt)
 #   DEVICE_VARIANT  board pin table in main/variants/ (LIGHT_VARIANT_<name>)
 #   DEVICE_LEMTONE  1 = link the Lemtone solver and act on 0x07 LemtoneUpdate
+#   DEVICE_LEMTONE_MODEL  generated calibration in lemtone/ (default lemtone_model_default.c)
+#   DEVICE_LEMTONE_MAX_KNOTS  knots per channel in the model struct (default 24, lemtone.h)
 set(DEVICE_TARGET  esp8266)
 set(DEVICE_PROJECT bulb-firmware)   # deployed bulbs carry this name; keep it
 set(DEVICE_TYPE    0x01)
 set(DEVICE_VARIANT KAUF_RGBWW)
 set(DEVICE_LEMTONE 1)
+set(DEVICE_LEMTONE_MAX_KNOTS 8)    # the bulb's model has 8; keeps its struct as before

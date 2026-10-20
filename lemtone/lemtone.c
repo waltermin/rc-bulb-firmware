@@ -2,7 +2,8 @@
 //
 // The solve:
 //   1. Closed form on a linear model XYZ = sum_i d_i P_i, as lemtone.html does: the
-//      white level `we` is split CW/WW by where the target projects onto the white line,
+//      white level `we` is split CW/WW so the white mix lands where the target projects
+//      onto the CW-WW xy line (a duty share, weighted by each white's X+Y+Z per unit duty),
 //      r,g,b come from the 3x3 primary inverse, and the range of `we` that keeps every
 //      duty in [0, duty_max] is found directly; fidelity picks a point in that range.
 //   2. Frozen coefficients: P_i starts as each channel's output per unit duty at
@@ -10,9 +11,12 @@
 //      duty-dependent colour included) and step 1 runs again, until the full model
 //      lands on the target. Because step 1 is redone with the true local P_i, the
 //      fidelity choice holds for the real model too (WW alone stays WW alone).
-//   3. Infeasible target: bisect the saturation along the OKLab line toward the target's
-//      point on the white line, at the same lumens. If even that point cannot reach the
-//      lumens, bisect the lumens there.
+//   3. Infeasible target: bisect the saturation along the OKLab line toward the white the
+//      whites alone make at the target's place on their line and at its lumens (always
+//      reachable, unlike the straight OKLab line between CW and WW, which runs ~0.01 off
+//      their mix midway). So the colour desaturates only as far as R, G, B run out of
+//      headroom, more as the lumens grow. If even that point cannot reach the lumens,
+//      bisect the lumens there.
 //
 // Targets arrive as OKLab chromaticity + lumens and are turned into XYZ once; the solve
 // itself runs in XYZ, where the model is (nearly) linear.
@@ -24,6 +28,7 @@
 #define FIX_ROUNDS   12     // rounds with it
 #define FIX_TOL      2e-3f  // converged when every XYZ error < FIX_TOL * Y
 #define BISECT_STEPS 10
+#define WHITE_ROUNDS 8      // white_only: luminance ratio iterations
 #define EPS          1e-6f
 
 const lemtone_period_cfg_t LEMTONE_PERIOD_DEFAULT = {
@@ -74,6 +79,12 @@ static void unit_xyz(const lemtone_model_t *m, int i, float d, float out[3]) {
     }
 }
 
+// Duty at which channel i's knots are read: its own, or the pair's DIM (white_by_dim).
+static float knot_duty(const lemtone_model_t *m, int i, const float d[LEMTONE_CH]) {
+    if (m->white_by_dim && (i == LEMTONE_WW || i == LEMTONE_CW)) return d[LEMTONE_WW] + d[LEMTONE_CW];
+    return d[i];
+}
+
 // Interaction factor g_i. Feature order matches calibration/analyze_mix.quad_feats.
 float lemtone_interaction(const lemtone_model_t *m, int i, const float d[LEMTONE_CH]) {
     float o[LEMTONE_CH - 1];
@@ -97,7 +108,7 @@ void lemtone_forward(const lemtone_ctx_t *ctx, const float d[LEMTONE_CH], float 
     for (int i = 0; i < LEMTONE_CH; i++) {
         if (d[i] <= 0.0f) continue;
         float u[3];
-        unit_xyz(ctx->m, i, d[i], u);
+        unit_xyz(ctx->m, i, knot_duty(ctx->m, i, d), u);
         const float s = d[i] * lemtone_interaction(ctx->m, i, d);
         for (int c = 0; c < 3; c++) xyz[c] += s * u[c];
     }
@@ -167,6 +178,15 @@ static float beta_on(const float cw[2], const float ww[2], const float p[2]) {
 }
 
 
+// Position t along the xy line CW -> WW -> WW share of the white duty that lands there (the
+// mix is weighted by each white's X+Y+Z per unit duty).
+static float duty_split(const float P[LEMTONE_CH][3], float t) {
+    const float sc = P[LEMTONE_CW][0] + P[LEMTONE_CW][1] + P[LEMTONE_CW][2];
+    const float sw = P[LEMTONE_WW][0] + P[LEMTONE_WW][1] + P[LEMTONE_WW][2];
+    const float den = sw * (1.0f - t) + t * sc;
+    return den > 0.0f ? t * sc / den : t;
+}
+
 // Inverse of the matrix whose columns are the r, g, b primaries. False if singular.
 static bool inv_rgb(const float P[LEMTONE_CH][3], float out[3][3]) {
     const float a = P[0][0], b = P[1][0], c = P[2][0];
@@ -198,7 +218,8 @@ static bool closed_form(const lemtone_ctx_t *ctx, const float P[LEMTONE_CH][3], 
     if (!inv_rgb(P, ainv)) return false;
     xy_of(P[LEMTONE_CW], cw);
     xy_of(P[LEMTONE_WW], ww);
-    const float beta = beta_on(cw, ww, p);
+    // the duty share that puts the white mix on p's place along the CW-WW xy line
+    const float beta = duty_split(P, beta_on(cw, ww, p));
     for (int c = 0; c < 3; c++) {
         wmix[c] = (1.0f - beta) * P[LEMTONE_CW][c] + beta * P[LEMTONE_WW][c];
     }
@@ -206,6 +227,7 @@ static bool closed_form(const lemtone_ctx_t *ctx, const float P[LEMTONE_CH][3], 
     mul3(ainv, wmix, b);
 
     float lo = 0.0f, hi = dmax / maxf(maxf(beta, 1.0f - beta), EPS);
+    if (ctx->m->white_sum_max > 0.0f) hi = minf(hi, ctx->m->white_sum_max);  // we = ww + cw
     const float tol = EPS * dmax;
     for (int k = 0; k < 3; k++) {
         if (absf(b[k]) < 1e-12f) {
@@ -235,7 +257,7 @@ static bool closed_form(const lemtone_ctx_t *ctx, const float P[LEMTONE_CH][3], 
 static void local_primaries(const lemtone_ctx_t *ctx, const float d[LEMTONE_CH], bool with_sag,
                             float P[LEMTONE_CH][3]) {
     for (int i = 0; i < LEMTONE_CH; i++) {
-        unit_xyz(ctx->m, i, d[i], P[i]);
+        unit_xyz(ctx->m, i, knot_duty(ctx->m, i, d), P[i]);
         const float g = with_sag ? lemtone_interaction(ctx->m, i, d) : 1.0f;
         for (int c = 0; c < 3; c++) P[i][c] *= g;
     }
@@ -273,6 +295,12 @@ static bool rounds(const lemtone_ctx_t *ctx, const float tgt[3], const float p[2
 // first round sags the whites, which then cannot reach the target alone, which keeps
 // the RGB on. At convergence the closed form (and so the fidelity choice) holds for
 // the full model, not just its linearisation at REF_DUTY.
+static void start_primaries(const lemtone_ctx_t *ctx, float P[LEMTONE_CH][3]) {
+    for (int i = 0; i < LEMTONE_CH; i++) {
+        for (int c = 0; c < 3; c++) P[i][c] = ctx->prim[i][c];
+    }
+}
+
 static bool attempt(const lemtone_ctx_t *ctx, const float tgt[3], float f, float d[LEMTONE_CH],
                     uint16_t *evals) {
     const float Y = tgt[1];
@@ -280,15 +308,11 @@ static bool attempt(const lemtone_ctx_t *ctx, const float tgt[3], float f, float
     float p[2];
     xy_of(tgt, p);
     float P[LEMTONE_CH][3];
-    for (int i = 0; i < LEMTONE_CH; i++) {
-        for (int c = 0; c < 3; c++) P[i][c] = ctx->prim[i][c];
-    }
+    start_primaries(ctx, P);
     bool feasible;
     if (!rounds(ctx, tgt, p, Y, f, false, PHASE1_ROUNDS, P, d, &feasible, evals) && !feasible) {
         // infeasible without sag: start phase 2 from scratch rather than give up
-        for (int i = 0; i < LEMTONE_CH; i++) {
-            for (int c = 0; c < 3; c++) P[i][c] = ctx->prim[i][c];
-        }
+        start_primaries(ctx, P);
     } else {
         local_primaries(ctx, d, true, P);
     }
@@ -312,8 +336,55 @@ static bool attempt_ab(const lemtone_ctx_t *ctx, const float ab[2], float Y, flo
     return target_xyz(ab, Y, tgt) && attempt(ctx, tgt, f, d, evals);
 }
 
-void lemtone_solve(const lemtone_ctx_t *ctx, float a, float b, float lm, float fidelity,
-                   lemtone_solution_t *out) {
+// Whites alone with WW duty share beta, at luminance Y or as close as the cap allows. Returns
+// the luminance delivered. Ratio iteration: Y is nearly linear in the white level.
+static float white_only(const lemtone_ctx_t *ctx, float beta, float Y, float d[LEMTONE_CH],
+                        uint16_t *evals) {
+    float cap = ctx->m->duty_max / maxf(maxf(beta, 1.0f - beta), EPS);
+    if (ctx->m->white_sum_max > 0.0f) cap = minf(cap, ctx->m->white_sum_max);
+    float xyz[3];
+    for (int i = 0; i < LEMTONE_CH; i++) d[i] = 0.0f;
+    d[LEMTONE_WW] = cap * beta;
+    d[LEMTONE_CW] = cap * (1.0f - beta);
+    lemtone_forward(ctx, d, xyz);
+    (*evals)++;
+    if (!(xyz[1] > Y)) return xyz[1];
+    float we = cap * Y / xyz[1];
+    for (int k = 0; k < WHITE_ROUNDS; k++) {
+        d[LEMTONE_WW] = we * beta;
+        d[LEMTONE_CW] = we * (1.0f - beta);
+        lemtone_forward(ctx, d, xyz);
+        (*evals)++;
+        if (absf(xyz[1] - Y) < FIX_TOL * Y || !(xyz[1] > 0.0f)) break;
+        we = minf(cap, we * Y / xyz[1]);
+    }
+    d[LEMTONE_WW] = we * beta;
+    d[LEMTONE_CW] = we * (1.0f - beta);
+    return Y;
+}
+
+// OKLab chromaticity of the whites alone at p's place on the CW-WW xy line, at luminance Y
+// (or the brightest they make there): where an unreachable colour desaturates to.
+static void white_anchor(const lemtone_ctx_t *ctx, const float p[2], float Y, float w[2],
+                         uint16_t *evals) {
+    float X[3], xy[2], cw[2], ww[2], d[LEMTONE_CH];
+    xy_of(ctx->prim[LEMTONE_CW], cw);
+    xy_of(ctx->prim[LEMTONE_WW], ww);
+    float t;
+    if (lemtone_ab_to_xyz(p[0], p[1], X)) {
+        xy_of(X, xy);
+        t = beta_on(cw, ww, xy);
+    } else {
+        t = beta_on(ctx->cw_ab, ctx->ww_ab, p);  // imaginary: project in OKLab instead
+    }
+    white_only(ctx, duty_split(ctx->prim, t), Y, d, evals);
+    lemtone_forward(ctx, d, X);
+    (*evals)++;
+    lemtone_xyz_to_ab(X, w);
+}
+
+static void solve_free(const lemtone_ctx_t *ctx, float a, float b, float lm, float fidelity,
+                       lemtone_solution_t *out) {
     out->evals = 0;
     out->desat = 0.0f;
     for (int i = 0; i < LEMTONE_CH; i++) out->duty[i] = 0.0f;
@@ -334,10 +405,11 @@ void lemtone_solve(const lemtone_ctx_t *ctx, float a, float b, float lm, float f
         return;
     }
 
-    // Desaturate along the OKLab line toward the target's own point on the white line.
-    const float beta = beta_on(ctx->cw_ab, ctx->ww_ab, p);
-    const float w[2] = {ctx->cw_ab[0] + beta * (ctx->ww_ab[0] - ctx->cw_ab[0]),
-                        ctx->cw_ab[1] + beta * (ctx->ww_ab[1] - ctx->cw_ab[1])};
+    // Desaturate toward the white the whites themselves make at the target's place on the
+    // CW-WW line and at its lumens: R, G, B pull the colour off that point as far as they can,
+    // which shrinks as the lumens grow.
+    float w[2];
+    white_anchor(ctx, p, Y, w, &out->evals);
     if (attempt_ab(ctx, w, Y, f, d, &out->evals)) {
         copy5(out->duty, d);
         float lo = 0.0f, hi = 1.0f;  // saturation kept: lo feasible, hi not
@@ -372,6 +444,90 @@ void lemtone_solve(const lemtone_ctx_t *ctx, float a, float b, float lm, float f
     out->lm = lo * lm;
 }
 
+// ---- driver whites on their tick grid ------------------------------------------------
+
+// R, G, B for XYZ tgt with the whites held at d[WW], d[CW] (frozen-coefficient rounds, the
+// interaction included). d[R..B] is the starting guess and receives the result, clamped to
+// [0, duty_max]. Returns how far the result misses tgt (largest XYZ error).
+static float rgb_for_whites(const lemtone_ctx_t *ctx, const float tgt[3], float d[LEMTONE_CH],
+                            uint16_t *evals) {
+    const float dmax = ctx->m->duty_max;
+    float P[LEMTONE_CH][3], ainv[3][3], rest[3], rgb[3];
+    for (int it = 0; it < FIX_ROUNDS; it++) {
+        local_primaries(ctx, d, true, P);
+        (*evals)++;
+        if (!inv_rgb(P, ainv)) break;
+        for (int c = 0; c < 3; c++) {
+            rest[c] = tgt[c] - d[LEMTONE_WW] * P[LEMTONE_WW][c] - d[LEMTONE_CW] * P[LEMTONE_CW][c];
+        }
+        mul3(ainv, rest, rgb);
+        float step = 0.0f;
+        for (int k = 0; k < 3; k++) {
+            const float v = clampf(rgb[k], 0.0f, dmax);
+            step = maxf(step, absf(v - d[k]));
+            d[k] = v;
+        }
+        if (step < 1e-5f) break;
+    }
+    float X[3], err = 0.0f;
+    lemtone_forward(ctx, d, X);
+    (*evals)++;
+    for (int c = 0; c < 3; c++) err = maxf(err, absf(X[c] - tgt[c]));
+    return err;
+}
+
+// Driver whites (white_grid_log2): put the white pair on its DIM / CCT grid and redo R, G, B
+// for the light the unsnapped solution makes, so the dim end of the white range does not land
+// in steps (at 8 bits one DIM step is 1-17% of the whites' light below ~100 lm).
+// Candidates in order: the nearest DIM step, the other neighbour, whites off. The first that
+// R, G, B complete to the solver's tolerance wins, else the one that misses least.
+static void snap_whites(const lemtone_ctx_t *ctx, lemtone_solution_t *out) {
+    const lemtone_model_t *m = ctx->m;
+    const float L = (float)(1u << m->white_grid_log2);
+    const float total = out->duty[LEMTONE_WW] + out->duty[LEMTONE_CW];
+    if (!(total > 0.0f)) return;
+    float tgt[3];
+    lemtone_forward(ctx, out->duty, tgt);
+    out->evals++;
+    const float cap = m->white_sum_max > 0.0f ? minf(m->white_sum_max, 1.0f) : 1.0f;
+    const float c = (float)(int)(out->duty[LEMTONE_WW] / total * L + 0.5f) / L;
+    const float x = total * L;
+    int nearest = (int)(x + 0.5f), other = (float)nearest > x ? nearest - 1 : nearest + 1;
+    const int dmin = m->white_dim_min;
+    if (nearest > 0 && nearest < dmin) {   // the driver's unusable bottom: dmin or off
+        nearest = (float)dmin - x < x ? dmin : 0;
+        other = nearest ? 0 : dmin;
+    } else if (other > 0 && other < dmin) {
+        other = nearest == dmin ? 0 : dmin;
+    }
+    const int cand[3] = {nearest, other, 0};
+    float best[LEMTONE_CH], best_err = -1.0f;
+    for (int k = 0; k < 3; k++) {
+        const int t = cand[k];
+        if (t < 0 || (float)t > cap * L || (k == 2 && (nearest == 0 || other == 0))) continue;
+        float d[LEMTONE_CH];
+        copy5(d, out->duty);
+        const float D = (float)t / L;
+        d[LEMTONE_WW] = D * c;
+        d[LEMTONE_CW] = D * (1.0f - c);
+        const float err = rgb_for_whites(ctx, tgt, d, &out->evals);
+        if (best_err < 0.0f || err < best_err) {
+            copy5(best, d);
+            best_err = err;
+        }
+        if (err < FIX_TOL * tgt[1]) break;
+    }
+    if (best_err >= 0.0f) copy5(out->duty, best);
+}
+
+void lemtone_solve(const lemtone_ctx_t *ctx, float a, float b, float lm, float fidelity,
+                   lemtone_solution_t *out) {
+    solve_free(ctx, a, b, lm, fidelity, out);
+    if (ctx->m->white_grid_log2 && (out->mode == LEMTONE_EXACT || out->mode == LEMTONE_DESAT)) {
+        snap_whites(ctx, out);
+    }
+}
+
 // ---- periods --------------------------------------------------------------------
 
 void lemtone_periods(const lemtone_period_cfg_t *cfg, const float duty[LEMTONE_CH], float lm,
@@ -396,21 +552,54 @@ void lemtone_periods(const lemtone_period_cfg_t *cfg, const float duty[LEMTONE_C
 
 // ---- quantize ---------------------------------------------------------------------
 
+float lemtone_pulse_us(const lemtone_model_t *m, int i, uint8_t n) {
+    if (!m->pulse_by_period) return m->pulse_us[i];
+    int k = (int)n - LEMTONE_PULSE_N0;
+    if (k < 0) k = 0;
+    if (k > LEMTONE_PULSE_NN - 1) k = LEMTONE_PULSE_NN - 1;
+    return m->pulse_n[i][k];
+}
+
+// Driver whites: DIM = ww + cw and CCT = ww / (ww + cw), each a whole number of 2^-n steps,
+// then back to the logical pair the mixer expects (it recomputes the same two ratios, and the
+// PWM rounds them back to these steps).
+static void quantize_white_pair(const lemtone_model_t *m, const float duty[LEMTONE_CH],
+                                lemtone_pwm_t *out) {
+    const uint8_t  n = m->white_grid_log2;
+    const float    L = (float)(1u << n);
+    const float    total = duty[LEMTONE_WW] + duty[LEMTONE_CW];
+    const float    cap = m->white_sum_max > 0.0f ? minf(m->white_sum_max, 1.0f) : 1.0f;
+    const uint32_t dmax = (uint32_t)(cap * L);
+    uint32_t dim = total > 0.0f ? (uint32_t)(total * L + 0.5f) : 0u;
+    if (dim > dmax) dim = dmax;
+    uint32_t cct = dim ? (uint32_t)(duty[LEMTONE_WW] / total * L + 0.5f) : 0u;
+    if (cct > (uint32_t)L) cct = (uint32_t)L;
+    const float D = (float)dim / L, c = (float)cct / L;
+    out->period_log2[LEMTONE_WW] = out->period_log2[LEMTONE_CW] = n;
+    out->ticks[LEMTONE_CW] = (uint16_t)dim;
+    out->ticks[LEMTONE_WW] = (uint16_t)cct;
+    out->cmd_duty[LEMTONE_WW] = out->eff_duty[LEMTONE_WW] = D * c;
+    out->cmd_duty[LEMTONE_CW] = out->eff_duty[LEMTONE_CW] = D * (1.0f - c);
+}
+
 void lemtone_quantize(const lemtone_ctx_t *ctx, const float duty[LEMTONE_CH],
                       const uint8_t period_log2[LEMTONE_CH], lemtone_pwm_t *out) {
     for (int i = 0; i < LEMTONE_CH; i++) {
         const uint8_t n = period_log2[i];
         const float   L = (float)(1u << n);
-        const float   pulse = ctx->m->pulse_us[i];
-        float t = duty[i] > 0.0f ? duty[i] * L - pulse : 0.0f;
+        const float   pulse = lemtone_pulse_us(ctx->m, i, n);
+        // under half a tick of light is off; with a negative pulse (light lost per pulse) a
+        // near-zero duty would otherwise still get the ~|pulse| ticks the pulse eats
+        float t = duty[i] * L >= 0.5f ? duty[i] * L - pulse : 0.0f;
         const uint32_t tmax = (uint32_t)(ctx->m->duty_max * L);  // floor: never above the cap
         uint32_t ticks = t > 0.0f ? (uint32_t)(t + 0.5f) : 0u;
         if (ticks > tmax) ticks = tmax;
         out->period_log2[i] = n;
         out->ticks[i] = (uint16_t)ticks;
         out->cmd_duty[i] = (float)ticks / L;
-        out->eff_duty[i] = ticks ? ((float)ticks + pulse) / L : 0.0f;
+        out->eff_duty[i] = ticks ? maxf(0.0f, (float)ticks + pulse) / L : 0.0f;
     }
+    if (ctx->m->white_grid_log2) quantize_white_pair(ctx->m, duty, out);
 }
 
 void lemtone_compute(const lemtone_ctx_t *ctx, const lemtone_period_cfg_t *cfg,

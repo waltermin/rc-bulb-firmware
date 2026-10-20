@@ -10,7 +10,18 @@
 #include <stdlib.h>
 
 #include "lemtone.h"
+// Vectors for the model being linked: build.py passes -DLEMTONE_VECTORS for models other than
+// the default (bulb) one. Each header carries the model's rated output; the bulb's predates
+// that and is the fallback below.
+#ifdef LEMTONE_VECTORS
+#include LEMTONE_VECTORS
+#else
 #include "lemtone_vectors.h"
+#endif
+#ifndef RATED_LM
+#define RATED_LM 1000.0f
+#define RATED_DUTY {0, 0, 0, ctx.m->duty_max, ctx.m->duty_max}
+#endif
 
 #define N_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
@@ -81,7 +92,10 @@ static void test_solve_vs_reference(void) {
                            k, i, per[i], v->period[i], s.duty[i], s.duty[i] * (1 << v->period[i]),
                            v->period[i], s.lm);
                 }
-                if (abs((int)pwm.ticks[i] - (int)v->ticks[i]) > 1) tick_diff++;
+                if (abs((int)pwm.ticks[i] - (int)v->ticks[i]) > 1) {
+                    tick_diff++;
+                    printf("  ticks differ at #%d ch %d: C %u ref %u (duty %.6f)\n", k, i, pwm.ticks[i], v->ticks[i], s.duty[i]);
+                }
             }
         } else {
             CHECK(dd < 0.02f || fabsf(s.desat - v->desat) < 0.01f,
@@ -92,7 +106,10 @@ static void test_solve_vs_reference(void) {
            N_OF(SOLVE_VECS), mode_diff, n_exact, worst_duty, worst_resid);
     CHECK(mode_diff <= N_OF(SOLVE_VECS) / 100, "%d mode mismatches (allowed: 1%%, boundary cases)", mode_diff);
     CHECK(worst_duty < 2e-3f, "exact solve duties differ from reference by %.2e", worst_duty);
-    CHECK(worst_resid < 2.5e-3f, "exact solve misses its target by %.2e of Y", worst_resid);
+    // Driver whites sit on a 1/256 DIM grid and R, G, B make up the rest; at the gamut edge
+    // they have no room left, so a few targets miss by up to ~0.6%.
+    const float resid_tol = ctx.m->white_grid_log2 ? 1e-2f : 2.5e-3f;
+    CHECK(worst_resid < resid_tol, "exact solve misses its target by %.2e of Y", worst_resid);
     CHECK(period_diff == 0, "%d periods differ from reference", period_diff);
     CHECK(tick_diff == 0, "%d tick counts differ from reference by more than 1", tick_diff);
 }
@@ -131,8 +148,8 @@ static void test_off_and_edges(void) {
     lemtone_solve(&ctx, 0.0f, 0.0f, -3.0f, 0.5f, &s);
     CHECK(s.mode == LEMTONE_OFF, "negative lm should be OFF, got %d", s.mode);
     lemtone_solve(&ctx, 0.0f, 0.0f, 1e6f, 1.0f, &s);
-    CHECK(s.mode == LEMTONE_CLAMP && s.lm > 500.0f && s.lm < 1100.0f, "1e6 lm should clamp, got mode %d %.1f lm",
-          s.mode, s.lm);
+    CHECK(s.mode == LEMTONE_CLAMP && s.lm > 0.5f * RATED_LM && s.lm < 1.1f * RATED_LM,
+          "1e6 lm should clamp, got mode %d %.1f lm", s.mode, s.lm);
     for (int i = 0; i < 5; i++) CHECK(s.duty[i] <= ctx.m->duty_max, "clamped duty %d = %f over cap", i, s.duty[i]);
 
     // Imaginary chromaticities desaturate like any unreachable colour instead of switching off.
@@ -143,11 +160,11 @@ static void test_off_and_edges(void) {
               imag[k][0], imag[k][1], s.mode, s.lm);
     }
 
-    // The rated output is 1000 lm by construction of lm_per_y.
+    // The rated output holds by construction of lm_per_y.
     float ab[2], lm;
-    const float rated[5] = {0, 0, 0, ctx.m->duty_max, ctx.m->duty_max};
+    const float rated[5] = RATED_DUTY;
     light_of(rated, ab, &lm);
-    CHECK(fabsf(lm - 1000.0f) < 0.05f, "rated duties give %.2f lm, want 1000", lm);
+    CHECK(fabsf(lm - RATED_LM) < 0.05f, "rated duties give %.2f lm, want %.0f", lm, RATED_LM);
 
     // Asking for exactly WW at the cap at full fidelity gives WW alone back (fidelity
     // must hold on the full model, not only on its linearisation).
@@ -159,13 +176,16 @@ static void test_off_and_edges(void) {
               s.duty[2] < 0.01f && s.duty[4] < 0.01f,
           "WW at cap, F1: duties %.3f %.3f %.3f %.3f %.3f, want WW %.2f alone", s.duty[0], s.duty[1], s.duty[2],
           s.duty[3], s.duty[4], ctx.m->duty_max);
-    // Same for CW at half power.
-    const float cw_half[5] = {0, 0, 0, 0, 0.4f};
+    // Same for CW at half power (on the driver's DIM grid where there is one).
+    const float cw_d = ctx.m->white_grid_log2
+                           ? lroundf(0.4f * (1 << ctx.m->white_grid_log2)) / (float)(1 << ctx.m->white_grid_log2)
+                           : 0.4f;
+    const float cw_half[5] = {0, 0, 0, 0, cw_d};
     light_of(cw_half, ab, &lm);
     lemtone_solve(&ctx, ab[0], ab[1], lm, 1.0f, &s);
-    CHECK(fabsf(s.duty[LEMTONE_CW] - 0.4f) < 0.01f && s.duty[0] < 0.01f && s.duty[1] < 0.01f && s.duty[2] < 0.01f &&
+    CHECK(fabsf(s.duty[LEMTONE_CW] - cw_d) < 0.01f && s.duty[0] < 0.01f && s.duty[1] < 0.01f && s.duty[2] < 0.01f &&
               s.duty[3] < 0.01f,
-          "CW 0.4, F1: duties %.3f %.3f %.3f %.3f %.3f, want CW 0.4 alone", s.duty[0], s.duty[1], s.duty[2],
+          "CW %.3f, F1: duties %.3f %.3f %.3f %.3f %.3f, want CW alone", cw_d, s.duty[0], s.duty[1], s.duty[2],
           s.duty[3], s.duty[4]);
 }
 
@@ -203,7 +223,8 @@ static void test_quantize(void) {
     const uint8_t per[5] = {14, 10, 10, 10, 12};
     lemtone_pwm_t q;
     lemtone_quantize(&ctx, duty, per, &q);
-    for (int i = 0; i < 5; i++) {
+    const int n_direct = ctx.m->white_grid_log2 ? 3 : 5;  // driver whites: checked below
+    for (int i = 0; i < n_direct; i++) {
         const float L = (float)(1u << per[i]);
         // what pwm_compile does with the command: lroundf(cmd * 2^n)
         CHECK(lroundf(q.cmd_duty[i] * L) == q.ticks[i], "ch %d cmd %.8f does not round-trip to %u ticks",
@@ -214,9 +235,27 @@ static void test_quantize(void) {
                   "ch %d effective %.6f vs asked %.6f: more than half a tick", i, q.eff_duty[i], duty[i]);
         }
     }
-    CHECK(q.ticks[2] == 0, "a duty below one pulse's light should be off, got %u ticks", q.ticks[2]);
-    // The pulse correction: 0.01 at 2^14 is 163.84 ticks of light, minus ~0.75 us of pulse.
-    CHECK(q.ticks[0] == (uint16_t)lroundf(0.01f * 16384 - ctx.m->pulse_us[0]), "red ticks %u", q.ticks[0]);
+    if (ctx.m->white_grid_log2) {
+        // what pwm_mix + pwm_compile do with the white pair: DIM = ww + cw and CCT = ww / DIM,
+        // each lroundf(x * 2^n) at the driver's fixed period
+        const float L = (float)(1u << ctx.m->white_grid_log2);
+        const float ww = q.cmd_duty[LEMTONE_WW], cw = q.cmd_duty[LEMTONE_CW];
+        CHECK(lroundf((ww + cw) * L) == q.ticks[LEMTONE_CW], "DIM %.6f does not round-trip to %u ticks",
+              ww + cw, q.ticks[LEMTONE_CW]);
+        CHECK(lroundf(ww / (ww + cw) * L) == q.ticks[LEMTONE_WW], "CCT %.6f does not round-trip to %u ticks",
+              ww / (ww + cw), q.ticks[LEMTONE_WW]);
+        CHECK(fabsf(ww + cw - (duty[3] + duty[4])) <= 0.5f / L + 1e-6f, "DIM %.5f vs asked %.5f", ww + cw,
+              duty[3] + duty[4]);
+    }
+    if (lemtone_pulse_us(ctx.m, 2, per[2]) >= 0.0f) {
+        CHECK(q.ticks[2] == 0, "a duty below one pulse's light should be off, got %u ticks", q.ticks[2]);
+    } else {  // pulses that lose light: the first ~|pulse| ticks are spent before any light
+        CHECK(q.ticks[2] <= (uint16_t)(1.5f - lemtone_pulse_us(ctx.m, 2, per[2])),
+              "a duty of 0.1 tick of light took %u ticks", q.ticks[2]);
+    }
+    // The pulse correction: 0.01 at 2^14 is 163.84 ticks of light, minus the pulse's own light.
+    CHECK(q.ticks[0] == (uint16_t)lroundf(0.01f * 16384 - lemtone_pulse_us(ctx.m, 0, 14)), "red ticks %u",
+          q.ticks[0]);
 }
 
 static void test_compute_is_stateless(void) {

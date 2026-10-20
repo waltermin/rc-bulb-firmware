@@ -219,6 +219,12 @@ void controller_start(void) {
 #if LEMTONE_ENABLED
     lemtone_init(&s_lemtone, &LEMTONE_MODEL_DEFAULT);
     ESP_LOGI(TAG, "lemtone model %s", s_lemtone.m->id);
+    // The model snaps the whites to its DIM / CCT grid; the driver inputs round to theirs.
+    const unsigned hw_bits = pwm_output_hw_bits();
+    if (hw_bits && s_lemtone.m->white_grid_log2 != hw_bits) {
+        ESP_LOGW(TAG, "lemtone model white grid %u bits, driver PWM %u bits: re-export the model",
+                 (unsigned)s_lemtone.m->white_grid_log2, hw_bits);
+    }
 #endif
     s_queue = xQueueCreate(8, sizeof(ctrl_msg_t));
     configASSERT(s_queue != NULL);

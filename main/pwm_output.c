@@ -6,8 +6,9 @@
 // critical section in the system, walks that table: it touches only RAM + GPIO and
 // timer registers, so it stays live through OTA flash writes.
 //
-// All hardware lives behind two seams:
+// All hardware lives behind three seams:
 //   port/pwm_timer.h     reading time, arming the next edge, GPIO writes
+//   port/pwm_hw.h        channels a PWM peripheral drives instead (variant hw_pwm)
 //   variants/variant.h   which GPIO each channel drives and what it MEANS
 //
 // The pipeline: pwm_output_set() clamps the levels, applies the duty-response
@@ -31,6 +32,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 
+#include "pwm_hw.h"
 #include "pwm_timer.h"
 #include "variant.h"
 
@@ -193,7 +195,8 @@ static void build_luts(void) {
     uint32_t chan_mask[PWM_CHANNELS];
     s_all_pins = 0;
     for (int i = 0; i < PWM_CHANNELS; i++) {
-        chan_mask[i] = 1u << s_channels[i].gpio;
+        // hw_pwm channels belong to the peripheral: the ISR never touches their pins
+        chan_mask[i] = s_channels[i].hw_pwm ? 0u : 1u << s_channels[i].gpio;
         s_all_pins |= chan_mask[i];
     }
     for (int state = 0; state < 256; state++) {
@@ -213,6 +216,23 @@ static inline float phase_fraction(float degrees) {
     return f;
 }
 
+// Hand the hw_pwm channels' duties to the peripheral and leave them out of the schedule
+// (duty 0: the engine compiles no edges for them). The peripheral switches at its next
+// carrier period, the schedule at its next wrap: at most one long period apart.
+static void route_hw(const float mixed[PWM_CHANNELS], pwm_chan_req_t reqs[PWM_CHANNELS]) {
+#if VARIANT_HW_PWM
+    for (int i = 0; i < PWM_CHANNELS; i++) {
+        if (s_channels[i].hw_pwm) {
+            pwm_hw_set(i, mixed[i]);
+            reqs[i].duty = 0.0f;
+        }
+    }
+#else
+    (void)mixed;
+    (void)reqs;
+#endif
+}
+
 // Build one compile request per physical channel from the computed duties, mixing
 // logical colour onto whatever this board actually has.
 static void build_reqs(color5_t duties, pwm_chan_req_t reqs[PWM_CHANNELS]) {
@@ -223,6 +243,7 @@ static void build_reqs(color5_t duties, pwm_chan_req_t reqs[PWM_CHANNELS]) {
         reqs[i].phase       = phase_fraction(s_channels[i].base_phase);
         reqs[i].period_log2 = s_channels[i].period_log2;
     }
+    route_hw(mixed, reqs);
 }
 
 // Apply the t=0 entry of the active schedule now, seed the target for the next
@@ -318,6 +339,14 @@ void pwm_output_set_default(void) {
                                   bulb_config_get_float(CFG_DEFAULT_CW)));
 }
 
+unsigned pwm_output_hw_bits(void) {
+#if VARIANT_HW_PWM
+    return VARIANT_HW_PWM_BITS;
+#else
+    return 0;
+#endif
+}
+
 void pwm_output_set_raw(const float duties[COLOR_COUNT],
                         const uint8_t period_log2[COLOR_COUNT]) {
     // Raw path: clamp duties to [0,1] but skip the curve and max-power cap, and
@@ -347,6 +376,7 @@ void pwm_output_set_raw(const float duties[COLOR_COUNT],
             reqs[i].period_log2 = n;
         }
     }
+    route_hw(mixed, reqs);
     publish_reqs(reqs);
 }
 
@@ -372,6 +402,13 @@ void pwm_output_init(void) {
     };
     gpio_config(&io);
     pwm_gpio_clr(s_all_pins);  // all low
+#if VARIANT_HW_PWM
+    pwm_hw_init(s_channels, PWM_CHANNELS);  // at duty 0 until the default below
+#else
+    for (int i = 0; i < PWM_CHANNELS; i++) {
+        if (s_channels[i].hw_pwm) ESP_LOGE(TAG, "channel %d is hw_pwm but the variant has no VARIANT_HW_PWM", i);
+    }
+#endif
 
     s_active = 0;
     s_running = false;

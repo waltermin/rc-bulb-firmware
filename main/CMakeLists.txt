@@ -57,6 +57,7 @@ else()
             esp_hw_support
             esp_timer
             esp_driver_gpio
+            esp_driver_ledc   # port/esp32c3/pwm_hw_ledc.c (variant hw_pwm channels)
             lwip
             mbedtls
             hal
@@ -77,9 +78,12 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 # every run). It also needs the Lemtone reference vectors from the host tests.
 if("$ENV{BULB_SELFTEST}" STREQUAL "1")
     if(NOT DEVICE_LEMTONE)
-        message(FATAL_ERROR "BULB_SELFTEST needs a device with the Lemtone solver (bulb)")
+        message(FATAL_ERROR "BULB_SELFTEST needs a device with the Lemtone solver")
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE LEMTONE_SELFTEST=1)
+    if(DEVICE_LEMTONE_MODEL STREQUAL "lemtone_model_panel.c")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE "LEMTONE_VECTORS=\"lemtone_vectors_panel.h\"")
+    endif()
     target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../lemtone/test")
     message(STATUS "rc firmware: LEMTONE_SELFTEST build")
 endif()

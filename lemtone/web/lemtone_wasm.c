@@ -112,5 +112,11 @@ EXPORT(lt_forward_xyz) float lt_forward_xyz(float r, float g, float b, float ww,
 }
 EXPORT(lt_lm_per_y) float lt_lm_per_y(void) { return s_ctx.m->lm_per_y; }
 EXPORT(lt_duty_max) float lt_duty_max(void) { return s_ctx.m->duty_max; }
-EXPORT(lt_pulse_us) float lt_pulse_us(int i) { return s_ctx.m->pulse_us[i]; }
+EXPORT(lt_pulse_us) float lt_pulse_us(int i) { return lemtone_pulse_us(s_ctx.m, i, 10); }  // at n = 10
 EXPORT(lt_model_id) const char *lt_model_id(void) { return s_ctx.m->id; }
+// Duty at which channel i's knots are read for the current output (lemtone.h white_by_dim).
+EXPORT(lt_knot_duty) float lt_knot_duty(int i) {
+    const float *d = s_pwm.eff_duty;
+    if (s_ctx.m->white_by_dim && (i == LEMTONE_WW || i == LEMTONE_CW)) return d[LEMTONE_WW] + d[LEMTONE_CW];
+    return d[i];
+}

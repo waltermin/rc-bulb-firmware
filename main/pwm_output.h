@@ -40,6 +40,10 @@ void pwm_output_set(float r, float g, float b, float ww, float cw);
 // Apply the compile-time / NVS DEFAULT_* color. Idempotent.
 void pwm_output_set_default(void);
 
+// Duty resolution, in bits, of the channels a PWM peripheral drives (variant hw_pwm:
+// the panel's driver inputs), or 0 if the board has none.
+unsigned pwm_output_hw_bits(void);
+
 // Set all five channels from RAW duty cycles: clamped to [0.0, 1.0] ONLY — no
 // gamma/perceptual curve and no max-power cap, so values above 0.8 WILL overdrive
 // the LEDs. Each channel also carries its own PWM period as a log2(ticks) exponent
